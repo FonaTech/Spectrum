@@ -349,28 +349,24 @@ $$
 E_v = 683 \int \Phi(\lambda)V(\lambda)d\lambda
 $$
 
-The code applies the same idea to the reconstructed relative SPD:
+The code first converts corrected channel counts into datasheet-referenced equivalent irradiance in `uW/cm^2`, using the AS7341 optical responsivity tables, optical gain ratios, and integration time. A visible-channel calibration vector is then applied before reconstruction. This keeps the original datasheet calculation available while preventing the low-responsivity blue channels, especially F2, from dominating the inverse result on this hardware setup. The calibrated SPD is reduced to a photopic equivalent irradiance:
+
+$$
+E_{e,\mathrm{photopic}} =
+\frac{\sum_j x_j V(\lambda_j)\Delta\lambda}
+{\sum_j V(\lambda_j)\Delta\lambda}
+$$
+
+The Lux estimate then uses the physical conversion:
 
 $$
 \mathrm{lux}_{\mathrm{est}} \approx
-683 \sum_j p_j V(\lambda_j)\Delta\lambda \cdot K_{\mathrm{SPD}}
+683 E_{e,\mathrm{photopic}} \cdot 0.01
 $$
 
-The default `SPD_LUX_CALIBRATION` is `0.02`, which scales the raw photopic integral down by about 50x based on observed behavior. This is still an estimate. For absolute Lux, the system must be calibrated with a reference lux meter:
+where `0.01` converts `uW/cm^2` into `W/m^2`. This is still an estimate because the AS7341 datasheet does not provide a device-specific absolute CIE photopic calibration matrix. For certified absolute Lux, calibrate with a reference lux meter.
 
-$$
-K_{\mathrm{SPD,new}} =
-\frac{L_{\mathrm{ref}}}{L_{\mathrm{displayed}}}
-$$
-
-The CSV also records:
-
-$$
-L_{\mathrm{clear}} =
-\frac{C_{\mathrm{corr}}}{gt_{\mathrm{ms}}}
-$$
-
-This allows users to compare SPD-derived Lux with a Clear-channel proxy and build their own calibration curve if their optical setup makes Clear more reliable.
+The CSV also records `clear_irradiance_uW_cm2`, allowing users to compare SPD-derived Lux with a Clear-channel proxy and build a device-specific calibration curve if their optical setup makes Clear more reliable.
 
 ## Radiant-power and Photon-count SPD
 
@@ -389,7 +385,8 @@ $$
 The application keeps both meanings separate:
 
 - GUI and WebUI default to photon-count SPD and can toggle back to radiant-power SPD.
-- CSV `relative_power` stores the radiant-power reconstruction.
+- CSV `relative_power` is retained for compatibility; `reconstructed_irradiance_uW_cm2` stores the calibrated reconstructed irradiance estimate.
+- CSV channel fields include both raw datasheet irradiance and calibrated irradiance: `datasheet_irradiance_uw_cm2_*` and `irradiance_uw_cm2_*`.
 - CSV `relative_photon_count` stores the wavelength-weighted photon-count proxy, and `photon_relative_intensity` stores its normalized plot value.
 - `lux_est` remains a photopic radiant-power estimate using $V(\lambda)$; it is not computed from photon-count SPD.
 
@@ -424,10 +421,10 @@ The CSV still exports every 0.1 nm point. The GUI and WebUI draw a downsampled r
 Pressing `Save` appends data to `as7341_spectrum_long.csv`. The export uses a long vertical table where each wavelength occupies one row. Fields include:
 
 - Timestamp, gain, integration time, and saturation state
-- Raw, dark, corrected, and normalized data for all 10 exported channels
+- Raw, dark, corrected, normalized, basic-count, datasheet `uW/cm^2`, and calibrated `uW/cm^2` irradiance data for all 10 exported channels
 - Visible SPD summary: dominant wavelength, centroid, estimated CCT, fit confidence, and peak list
-- `kind,wavelength_nm,relative_intensity,relative_power,photon_relative_intensity,relative_photon_count`
-- `lux_est,lux_source,clear_lux_signal`
+- `kind,wavelength_nm,relative_intensity,relative_power,reconstructed_irradiance_uW_cm2,photon_relative_intensity,relative_photon_count`
+- `lux_est,lux_source,clear_lux_signal,clear_irradiance_uW_cm2`
 - Photon summary fields: `photon_integral,photon_dominant_nm,photon_centroid_nm,photon_peaks_nm`
 - Full 0.1 nm visible SPD data over 380-780 nm
 - Full 0.1 nm IR estimate data over 760-1000 nm
@@ -445,8 +442,8 @@ First, dark calibration:
 Second, optical calibration:
 
 - Use a stable reference light source or calibrated lux meter.
-- Record the displayed `lux_est` and reference Lux.
-- Adjust `SPD_LUX_CALIBRATION`.
+- Record the displayed `lux_est`, `clear_irradiance_uW_cm2`, and reference Lux.
+- Fit a device-specific calibration curve if absolute photometry is required.
 - For spectral accuracy, use a monochromator or calibrated spectral source to derive a real device-specific response matrix.
 
 A proper calibration matrix can be written conceptually as:

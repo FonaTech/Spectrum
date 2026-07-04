@@ -287,7 +287,7 @@ class AS7341:
         (445, 30, 110),
         (480, 36, 210),
         (515, 39, 390),
-        (555, 39, 680),
+        (555, 39, 590),
         (590, 40, 840),
         (630, 50, 1350),
         (680, 52, 1070),
@@ -302,8 +302,16 @@ class AS7341:
     SUPPORT_PRIOR_STRENGTH = 0.18
     SUPPORT_PRIOR_FLOOR = 0.06
     PEAK_SUPPORT_MIN = 0.12
-    SPD_LUX_CALIBRATION = 0.02
-    CLEAR_LUX_CALIBRATION = 100.0
+    UW_CM2_TO_W_M2 = 0.01
+    CLEAR_LUX_CALIBRATION = 6.83
+    REF_VISIBLE_EE_UW_CM2 = 107.67
+    REF_VISIBLE_INTEGRATION_MS = 27.8
+    REF_NIR_EE_UW_CM2 = 98.0
+    REF_NIR_INTEGRATION_MS = 100.0
+    REF_NIR_GAIN_RATIO_64X = 2.0
+    NIR_940_RESPONSIVITY_COUNTS = 5135.0
+    OPTICAL_GAIN_RATIOS_64X = [0.008, 0.016, 0.032, 0.065, 0.125, 0.25, 0.5, 1.0, 2.0, 3.95, 7.75]
+    CHANNEL_IRRADIANCE_CALIBRATION = (0.077272, 0.134539, 0.225688, 0.370326, 0.515721, 0.684158, 1.0, 0.83031, 1.0, 1.0)
     SPECTRUM_GRID = _make_nm_grid(380.0, 780.0, GRID_STEP_NM)
     IR_GRID = _make_nm_grid(760.0, 1000.0, GRID_STEP_NM)
     _VISIBLE_MODEL_CACHE = None
@@ -441,6 +449,11 @@ class AS7341:
     def gain_value(self):
         return self.GAIN_STEPS[self.gain_index][1]
 
+    def optical_gain_ratio_64x(self):
+        if self.gain_index < len(self.OPTICAL_GAIN_RATIOS_64X):
+            return self.OPTICAL_GAIN_RATIOS_64X[self.gain_index]
+        return max(0.001, float(self.gain_value()) / 64.0)
+
     def set_integration_registers(self, atime, astep):
         atime = max(0, min(255, int(atime)))
         astep = max(1, min(65534, int(astep)))
@@ -537,7 +550,10 @@ class AS7341:
         }
         sample["corrected"] = self.apply_dark(values)
         sample["normalized"] = self.normalize(sample["corrected"])
-        sample["spectrum"] = self.reconstruct_spectrum(sample["corrected"])
+        sample["basic_counts"] = self.basic_counts(sample["corrected"])
+        sample["datasheet_irradiance_uW_cm2"] = self.irradiance_uW_cm2(sample["corrected"], calibrated=False)
+        sample["irradiance_uW_cm2"] = self.apply_irradiance_calibration(sample["datasheet_irradiance_uW_cm2"])
+        sample["spectrum"] = self.reconstruct_spectrum(sample["corrected"], sample["irradiance_uW_cm2"])
         sample["peak"] = self.peak_channel(sample["corrected"])
         self.last_sample = sample
         return sample
@@ -549,48 +565,91 @@ class AS7341:
         max_value = max(max(values), 1)
         return [v / max_value for v in values]
 
+    def basic_counts(self, corrected):
+        exposure_scale = self._visible_exposure_scale()
+        return [max(0.0, float(value)) / exposure_scale for value in corrected]
+
+    def irradiance_uW_cm2(self, corrected, calibrated=True):
+        out = []
+        for index, value in enumerate(corrected):
+            out.append(self._channel_irradiance_uW_cm2(index, value))
+        if calibrated:
+            return self.apply_irradiance_calibration(out)
+        return out
+
+    def apply_irradiance_calibration(self, values):
+        out = []
+        for index, value in enumerate(values):
+            factor = self.CHANNEL_IRRADIANCE_CALIBRATION[index] if index < len(self.CHANNEL_IRRADIANCE_CALIBRATION) else 1.0
+            out.append(max(0.0, float(value)) * factor)
+        return out
+
+    def _visible_exposure_scale(self):
+        return max(
+            1e-9,
+            self.optical_gain_ratio_64x() * self.integration_ms() / self.REF_VISIBLE_INTEGRATION_MS,
+        )
+
+    def _channel_irradiance_uW_cm2(self, index, corrected_value):
+        corrected_value = max(0.0, float(corrected_value))
+        if index < 8:
+            reference_counts = float(self.SPECTRAL_BANDS[index][2])
+            exposure_scale = self._visible_exposure_scale()
+            return corrected_value * self.REF_VISIBLE_EE_UW_CM2 / max(1e-12, reference_counts * exposure_scale)
+        if index == 8:
+            reference_counts = float(self.CLEAR_BAND[2])
+            exposure_scale = self._visible_exposure_scale()
+            return corrected_value * self.REF_VISIBLE_EE_UW_CM2 / max(1e-12, reference_counts * exposure_scale)
+        if index == 9:
+            exposure_scale = (
+                self.optical_gain_ratio_64x()
+                / self.REF_NIR_GAIN_RATIO_64X
+                * self.integration_ms()
+                / self.REF_NIR_INTEGRATION_MS
+            )
+            return corrected_value * self.REF_NIR_EE_UW_CM2 / max(1e-12, self.NIR_940_RESPONSIVITY_COUNTS * exposure_scale)
+        return 0.0
+
     def peak_channel(self, values):
         visible = values[:8]
         index = visible.index(max(visible)) if visible else 0
         name, wavelength = self.CHANNELS[index]
         return {"name": name, "wavelength": wavelength, "value": visible[index]}
 
-    def reconstruct_spectrum(self, corrected):
+    def reconstruct_spectrum(self, corrected, irradiance=None):
         grid = self.SPECTRUM_GRID
         bands = self.SPECTRAL_BANDS
-        measured = [corrected[i] for i in range(8)]
-        exposure = max(0.001, float(self.gain_value()) * float(self.integration_ms()))
-        y = [max(0.0, float(v)) / exposure for v in measured]
+        if irradiance is None:
+            irradiance = self.irradiance_uW_cm2(corrected)
+        measured = [irradiance[i] for i in range(8)]
+        exposure = self._visible_exposure_scale()
+        y = [max(0.0, float(v)) for v in measured]
         if max(y) <= 0:
             empty = self._empty_spectrum(grid)
-            lux_est, clear_lux_signal = self._estimate_lux_from_clear(corrected, exposure)
+            lux_est, clear_lux_signal = self._estimate_lux_from_clear(corrected, irradiance)
             empty["lux_est"] = lux_est
             empty["clear_lux_signal"] = clear_lux_signal
+            empty["clear_irradiance_uW_cm2"] = clear_lux_signal
             empty["lux_source"] = "clear_fallback"
             empty["ir"] = self._reconstruct_ir(corrected, exposure)
             return empty
 
-        max_sensitivity = max([b[2] for b in bands])
-        ycorr = []
+        ycorr = list(y)
         model = self._visible_model()
         rows = model["rows"]
         inv_denominator = model["inv_denominator"]
         support_prior = model["support_prior"]
         peak_support = model["peak_support"]
-        for index, band in enumerate(bands):
-            _, _, sensitivity = band
-            sensitivity_scale = max(0.01, float(sensitivity) / max_sensitivity)
-            ycorr.append(y[index] / sensitivity_scale)
 
         x = self._initial_spectrum(rows, ycorr, grid, inv_denominator, support_prior)
         for _ in range(self.INVERSE_ITERATIONS):
             x = self._multiplicative_update(x, rows, ycorr, inv_denominator, support_prior)
             x = self._smooth_spectrum(x)
 
-        x = self._apply_clear_constraint(x, corrected[8], max_sensitivity, exposure, grid)
+        x = self._apply_clear_constraint(x, irradiance[8] if len(irradiance) > 8 else 0.0, grid)
         prediction = self._predict_channels(x, rows)
         fit_error = self._fit_error(prediction, ycorr)
-        summary = self._spectrum_summary(grid, x, corrected, fit_error, exposure, peak_support)
+        summary = self._spectrum_summary(grid, x, corrected, fit_error, exposure, peak_support, irradiance)
         summary["peaks"] = self._find_spectrum_peaks(grid, summary["values"], peak_support, limit=5)
         summary["photon_peaks"] = self._find_spectrum_peaks(grid, summary["photon_values"], peak_support, limit=5)
         summary["ir"] = self._reconstruct_ir(corrected, exposure)
@@ -610,6 +669,7 @@ class AS7341:
             "photon_centroid_nm": 0,
             "lux_est": 0.0,
             "clear_lux_signal": 0.0,
+            "clear_irradiance_uW_cm2": 0.0,
             "lux_source": "spd_photopic",
             "cct_est": 0,
             "nir_ratio": 0.0,
@@ -772,10 +832,8 @@ class AS7341:
             out[index] = keep * value + blend * avg
         return out
 
-    def _apply_clear_constraint(self, spectrum, clear_value, max_sensitivity, exposure, grid):
-        clear_y = max(0.0, float(clear_value)) / exposure
-        clear_scale = float(self.CLEAR_BAND[2]) / max_sensitivity
-        clear_y = clear_y / max(clear_scale, 0.01)
+    def _apply_clear_constraint(self, spectrum, clear_irradiance, grid):
+        clear_y = max(0.0, float(clear_irradiance))
         if clear_y <= 0:
             return spectrum
         clear_row = self._clear_row(grid)
@@ -803,7 +861,7 @@ class AS7341:
             total += abs(prediction[index] - value) / (abs(value) + ref * 0.05)
         return total / max(1, len(ycorr))
 
-    def _spectrum_summary(self, grid, power, corrected, fit_error, exposure, peak_support=None):
+    def _spectrum_summary(self, grid, power, corrected, fit_error, exposure, peak_support=None, irradiance=None):
         max_power = max(max(power), 1e-12)
         values = [value / max_power for value in power]
         photon_power = []
@@ -863,7 +921,7 @@ class AS7341:
         nir_ratio = float(corrected[9]) / max(1.0, visible_avg)
         clear_ratio = float(corrected[8]) / max(1.0, visible_avg)
         confidence = max(0.0, min(1.0, 1.0 - fit_error))
-        lux_est, clear_lux_signal = self._estimate_lux_from_spd(grid, power, corrected, exposure)
+        lux_est, clear_lux_signal = self._estimate_lux_from_spd(grid, power, corrected, exposure, irradiance)
         return {
             "grid": list(grid),
             "values": values,
@@ -877,6 +935,7 @@ class AS7341:
             "photon_centroid_nm": round(float(photon_centroid), 1),
             "lux_est": lux_est,
             "clear_lux_signal": clear_lux_signal,
+            "clear_irradiance_uW_cm2": clear_lux_signal,
             "lux_source": "spd_photopic",
             "cct_est": int(cct),
             "nir_ratio": nir_ratio,
@@ -884,24 +943,30 @@ class AS7341:
             "fit_confidence": confidence,
         }
 
-    def _estimate_lux_from_clear(self, corrected, exposure):
-        clear_signal = self._clear_lux_signal(corrected, exposure)
+    def _estimate_lux_from_clear(self, corrected, irradiance=None):
+        clear_signal = self._clear_lux_signal(corrected, irradiance)
         lux_est = clear_signal * self.CLEAR_LUX_CALIBRATION
         return max(0.0, lux_est), clear_signal
 
-    def _clear_lux_signal(self, corrected, exposure):
+    def _clear_lux_signal(self, corrected, irradiance=None):
+        if irradiance and len(irradiance) > 8:
+            return max(0.0, float(irradiance[8]))
         clear_value = float(corrected[8]) if len(corrected) > 8 else 0.0
-        return max(0.0, clear_value) / max(0.001, float(exposure))
+        return self._channel_irradiance_uW_cm2(8, clear_value)
 
-    def _estimate_lux_from_spd(self, grid, power, corrected, exposure):
-        clear_signal = self._clear_lux_signal(corrected, exposure)
+    def _estimate_lux_from_spd(self, grid, power, corrected, exposure, irradiance=None):
+        clear_signal = self._clear_lux_signal(corrected, irradiance)
         weights = self._photopic_weights(grid)
         total = 0.0
+        weight_total = 0.0
         for index, value in enumerate(power):
             if index >= len(weights):
                 break
-            total += max(0.0, float(value)) * weights[index]
-        lux_est = 683.0 * total * self.SPD_LUX_CALIBRATION
+            weight = weights[index]
+            total += max(0.0, float(value)) * weight
+            weight_total += weight
+        photopic_equiv_irradiance = total / max(weight_total, 1e-12)
+        lux_est = 683.0 * photopic_equiv_irradiance * self.UW_CM2_TO_W_M2
         return max(0.0, lux_est), clear_signal
 
     def _photopic_weights(self, grid):
@@ -962,10 +1027,7 @@ class AS7341:
 
     def _reconstruct_ir(self, corrected, exposure):
         grid = self.IR_GRID
-        _, _, sensitivity = self.NIR_BAND
-        nir_signal = max(0.0, float(corrected[9])) / max(0.001, exposure)
-        sensitivity_scale = max(0.01, sensitivity / 1350.0)
-        amplitude = nir_signal / sensitivity_scale
+        amplitude = self._channel_irradiance_uW_cm2(9, corrected[9] if len(corrected) > 9 else 0.0)
         shape = self._ir_shape()
         values = [amplitude * value for value in shape["shape"]]
         if amplitude <= 1e-12:
@@ -1403,6 +1465,7 @@ class SpectrometerUI:
         self.buttons.append((btn_x, btn_y, btn_w, btn_h, "toggle_spectrum_mode"))
         values = sample.get("corrected", [0] * 10) if sample else [0] * 10
         raw = sample.get("raw", [0] * 10) if sample else [0] * 10
+        irradiance = sample.get("irradiance_uW_cm2", [0.0] * 10) if sample else [0.0] * 10
         channels = sample.get("channels", []) if sample else []
         if not channels:
             labels = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "Clear", "NIR"]
@@ -1420,7 +1483,7 @@ class SpectrometerUI:
                 label += " %dnm" % wavelength
             img.draw_string(x + 24, ry + 2, label, self.p.text, 0.66, wrap=False)
             img.draw_string(x + w - 92, ry + 1, "%5d" % values[idx], color, 0.68, wrap=False)
-            img.draw_string(x + w - 92, ry + 15, "raw %5d" % raw[idx], self.p.dim, 0.48, wrap=False)
+            img.draw_string(x + w - 104, ry + 15, "E %6.1f uW" % irradiance[idx], self.p.dim, 0.46, wrap=False)
 
     def _draw_bottom_controls(self, img, running):
         y = self.h - 62
@@ -1704,7 +1767,7 @@ let last=null;
  ctx.strokeStyle='#313f52';ctx.lineWidth=1;for(let i=0;i<5;i++){let y=30+i*(H-70)/4;ctx.beginPath();ctx.moveTo(50,y);ctx.lineTo(W-25,y);ctx.stroke();}
  let g=data.spectrum.grid||[],v=data.spectrum.values||[]; if(g.length>1){let x0=50,y0=H-40,gw=W-80,gh=H-80;for(let i=0;i<g.length-1;i++){let x1=x0+(g[i]-380)*gw/400,x2=x0+(g[i+1]-380)*gw/400,y1=y0-v[i]*gh,y2=y0-v[i+1]*gh;ctx.fillStyle=colorFor(g[i]);ctx.beginPath();ctx.moveTo(x1,y0);ctx.lineTo(x1,y1);ctx.lineTo(x2,y2);ctx.lineTo(x2,y0);ctx.closePath();ctx.fill();}ctx.strokeStyle='#e8eef4';ctx.lineWidth=2;ctx.beginPath();for(let i=0;i<g.length;i++){let x=x0+(g[i]-380)*gw/400,y=y0-v[i]*gh;if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);}ctx.stroke();ctx.fillStyle='#e8eef4';ctx.font='18px Arial';(data.spectrum.peaks||[]).slice(0,5).forEach(p=>{let x=x0+(p.wavelength-380)*gw/400,y=y0-p.value*gh;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill();ctx.fillText(Number(p.wavelength).toFixed(1)+'nm',Math.max(52,Math.min(W-96,x-32)),Math.max(22,y-12));});}
 	 document.getElementById('stats').textContent=modeLabel+' peak '+Number(data.spectrum.dominant_nm||0).toFixed(1)+'nm | centroid '+Number(data.spectrum.centroid_nm||0).toFixed(1)+'nm | Lux~'+Number(data.spectrum.lux_est||0).toFixed(0)+' | fit '+Math.round(data.spectrum.fit_confidence*100)+'% | CCT~'+data.spectrum.cct_est+'K | IR '+(data.spectrum.ir?data.spectrum.ir.relative.toFixed(2):'0');
- const ch=document.getElementById('channels');ch.innerHTML='';(data.channels||[]).forEach((it,i)=>{let d=document.createElement('div');d.className='card';d.innerHTML='<b>'+it.name+(it.wavelength?' '+it.wavelength+'nm':'')+'</b><br><span>'+it.corrected+'</span><br><span class="muted small">raw '+it.raw+'</span>';ch.appendChild(d);});
+	 const ch=document.getElementById('channels');ch.innerHTML='';(data.channels||[]).forEach((it,i)=>{let d=document.createElement('div');d.className='card';d.innerHTML='<b>'+it.name+(it.wavelength?' '+it.wavelength+'nm':'')+'</b><br><span>'+it.corrected+'</span><br><span class="muted small">E '+Number(it.irradiance_uW_cm2||0).toFixed(1)+' uW/cm^2</span><br><span class="muted small">raw '+it.raw+'</span>';ch.appendChild(d);});
 }
 function tick(){fetch('/api/state').then(r=>r.json()).then(draw).catch(()=>{});}setInterval(tick,700);tick();
 </script></body></html>"""
@@ -1887,6 +1950,9 @@ class SpectrometerApp:
             spectrum = self._web_spectrum(self.sample.get("spectrum", {}))
             raw = self.sample.get("raw", [])
             corrected = self.sample.get("corrected", [])
+            basic = self.sample.get("basic_counts", [])
+            datasheet_irradiance = self.sample.get("datasheet_irradiance_uW_cm2", [])
+            irradiance = self.sample.get("irradiance_uW_cm2", [])
             for index, item in enumerate(AS7341.CHANNELS):
                 name, wavelength = item
                 channels.append(
@@ -1895,6 +1961,9 @@ class SpectrometerApp:
                         "wavelength": wavelength,
                         "raw": raw[index] if index < len(raw) else 0,
                         "corrected": corrected[index] if index < len(corrected) else 0,
+                        "basic_counts": basic[index] if index < len(basic) else 0,
+                        "datasheet_irradiance_uW_cm2": datasheet_irradiance[index] if index < len(datasheet_irradiance) else 0,
+                        "irradiance_uW_cm2": irradiance[index] if index < len(irradiance) else 0,
                     }
                 )
         if not spectrum:
@@ -2070,11 +2139,13 @@ class SpectrometerApp:
             "wavelength_nm",
             "relative_intensity",
             "relative_power",
+            "reconstructed_irradiance_uW_cm2",
             "photon_relative_intensity",
             "relative_photon_count",
             "lux_est",
             "lux_source",
             "clear_lux_signal",
+            "clear_irradiance_uW_cm2",
             "gain",
             "integration_ms",
             "saturated",
@@ -2097,6 +2168,9 @@ class SpectrometerApp:
         fields += ["dark_" + n for n in names]
         fields += ["corr_" + n for n in names]
         fields += ["norm_" + n for n in names]
+        fields += ["basic_" + n for n in names]
+        fields += ["datasheet_irradiance_uw_cm2_" + n for n in names]
+        fields += ["irradiance_uw_cm2_" + n for n in names]
         return ",".join(fields)
 
     def _csv_rows(self, ticks_ms, sample):
@@ -2129,10 +2203,14 @@ class SpectrometerApp:
         base += [str(int(v)) for v in dark]
         base += [str(int(v)) for v in sample.get("corrected", [])]
         base += ["%.5f" % float(v) for v in sample.get("normalized", [])]
+        base += ["%.6f" % float(v) for v in sample.get("basic_counts", [])]
+        base += ["%.6f" % float(v) for v in sample.get("datasheet_irradiance_uW_cm2", [])]
+        base += ["%.6f" % float(v) for v in sample.get("irradiance_uW_cm2", [])]
 
         lux_est = "%.3f" % float(spectrum.get("lux_est", 0))
         lux_source = str(spectrum.get("lux_source", "spd_photopic"))
         clear_lux_signal = "%.6f" % float(spectrum.get("clear_lux_signal", 0))
+        clear_irradiance = "%.6f" % float(spectrum.get("clear_irradiance_uW_cm2", spectrum.get("clear_lux_signal", 0)))
         for row in self._iter_spectrum_csv_rows(
             ticks_ms,
             "visible_spd",
@@ -2144,6 +2222,7 @@ class SpectrometerApp:
             lux_est,
             lux_source,
             clear_lux_signal,
+            clear_irradiance,
             base,
         ):
             yield row
@@ -2159,6 +2238,7 @@ class SpectrometerApp:
             lux_est,
             lux_source,
             clear_lux_signal,
+            clear_irradiance,
             base,
         ):
             yield row
@@ -2184,6 +2264,7 @@ class SpectrometerApp:
         lux_est,
         lux_source,
         clear_lux_signal,
+        clear_irradiance,
         base,
     ):
         limit = min(len(grid), len(values))
@@ -2197,11 +2278,13 @@ class SpectrometerApp:
                 "%.1f" % float(grid[index]),
                 "%.8f" % float(values[index]),
                 "%.9g" % float(relative_power),
+                "%.9g" % float(relative_power),
                 "%.8f" % float(photon_relative),
                 "%.9g" % float(relative_photon_count),
                 lux_est,
                 lux_source,
                 clear_lux_signal,
+                clear_irradiance,
             ]
             yield ",".join(row + base)
 

@@ -349,28 +349,24 @@ $$
 E_v = 683 \int \Phi(\lambda)V(\lambda)d\lambda
 $$
 
-程序将同样思想用于重建的相对 SPD：
+程序首先根据 AS7341 数据手册中的通道响应度、光学增益比例和积分时间，把 corrected count 换算为 `uW/cm^2` 的 datasheet 等效辐照度。随后程序会应用一组可见光通道校准系数再进行反演；这样既保留官方公式的原始结果，也能避免 F2 这类低响应蓝光通道在本硬件光路中被过度放大。校准后的 SPD 会进一步压缩为明视觉等效辐照度：
+
+$$
+E_{e,\mathrm{photopic}} =
+\frac{\sum_j x_j V(\lambda_j)\Delta\lambda}
+{\sum_j V(\lambda_j)\Delta\lambda}
+$$
+
+Lux 估算使用：
 
 $$
 \mathrm{lux}_{\mathrm{est}} \approx
-683 \sum_j p_j V(\lambda_j)\Delta\lambda \cdot K_{\mathrm{SPD}}
+683 E_{e,\mathrm{photopic}} \cdot 0.01
 $$
 
-默认 `SPD_LUX_CALIBRATION` 为 `0.02`，相当于把原始明视觉积分缩小约 50 倍。这仍然是估算值。若需要绝对 Lux，必须使用标准照度计重新标定：
+其中 `0.01` 用于将 `uW/cm^2` 换算为 `W/m^2`。这仍然是估算值，因为 AS7341 数据手册没有提供面向单颗器件和实际光路的绝对 CIE 明视觉标定矩阵。若需要认证级绝对 Lux，必须使用标准照度计重新标定。
 
-$$
-K_{\mathrm{SPD,new}} =
-\frac{L_{\mathrm{ref}}}{L_{\mathrm{displayed}}}
-$$
-
-CSV 同时记录：
-
-$$
-L_{\mathrm{clear}} =
-\frac{C_{\mathrm{corr}}}{gt_{\mathrm{ms}}}
-$$
-
-这样用户可以比较 SPD 明视觉积分和 Clear 通道代理量，也可以在自己的光路条件下建立更适合的照度标定曲线。
+CSV 同时记录 `clear_irradiance_uW_cm2`，这样用户可以比较 SPD 明视觉积分和 Clear 通道代理量，也可以在自己的光路条件下建立更适合的照度标定曲线。
 
 ## 辐射功率 SPD 与积分光子数 SPD
 
@@ -389,7 +385,8 @@ $$
 程序会明确区分这两种物理含义：
 
 - GUI 和 WebUI 默认显示积分光子数 SPD，也可以切换回辐射功率 SPD。
-- CSV 的 `relative_power` 保存辐射功率重建结果。
+- CSV 的 `relative_power` 为兼容字段；`reconstructed_irradiance_uW_cm2` 保存校准后的重建辐照度估计。
+- CSV 的通道字段同时包含 datasheet 原始辐照度和校准辐照度：`datasheet_irradiance_uw_cm2_*` 与 `irradiance_uw_cm2_*`。
 - CSV 的 `relative_photon_count` 保存按波长加权后的相对光子数代理量，`photon_relative_intensity` 保存其归一化绘图值。
 - `lux_est` 仍然是基于 $V(\lambda)$ 的明视觉辐射功率估计，不从光子数 SPD 计算。
 
@@ -424,10 +421,10 @@ CSV 会导出每一个 0.1 nm 点。GUI 和 WebUI 则绘制降采样后的视觉
 点击 `Save` 后，数据追加到 `as7341_spectrum_long.csv`。导出为纵向长表，每个波长占一行。字段包括：
 
 - 采样时间戳、增益、积分时间、饱和状态
-- 10 个通道的 raw、dark、corrected、normalized 数据
+- 10 个通道的 raw、dark、corrected、normalized、basic count、datasheet `uW/cm^2` 和校准 `uW/cm^2` 数据
 - 可见光 SPD 摘要：主峰、质心、估算 CCT、拟合置信度、峰值列表
-- `kind,wavelength_nm,relative_intensity,relative_power,photon_relative_intensity,relative_photon_count`
-- `lux_est,lux_source,clear_lux_signal`
+- `kind,wavelength_nm,relative_intensity,relative_power,reconstructed_irradiance_uW_cm2,photon_relative_intensity,relative_photon_count`
+- `lux_est,lux_source,clear_lux_signal,clear_irradiance_uW_cm2`
 - 光子数摘要字段：`photon_integral,photon_dominant_nm,photon_centroid_nm,photon_peaks_nm`
 - 380-780 nm 可见光 SPD 完整 0.1 nm 连续数据
 - 760-1000 nm 红外估计完整 0.1 nm 连续数据
@@ -445,8 +442,8 @@ CSV 会导出每一个 0.1 nm 点。GUI 和 WebUI 则绘制降采样后的视觉
 第二，光学校准：
 
 - 使用稳定参考光源或标准照度计。
-- 记录显示的 `lux_est` 与参考 Lux。
-- 调整 `SPD_LUX_CALIBRATION`。
+- 记录显示的 `lux_est`、`clear_irradiance_uW_cm2` 与参考 Lux。
+- 若需要绝对光度结果，拟合设备级校准曲线。
 - 若要提高光谱准确性，使用单色仪或标准光谱源建立设备级响应矩阵。
 
 设备级标定矩阵可概念化写为：
