@@ -311,7 +311,7 @@ class AS7341:
     REF_NIR_GAIN_RATIO_64X = 2.0
     NIR_940_RESPONSIVITY_COUNTS = 5135.0
     OPTICAL_GAIN_RATIOS_64X = [0.008, 0.016, 0.032, 0.065, 0.125, 0.25, 0.5, 1.0, 2.0, 3.95, 7.75]
-    CHANNEL_IRRADIANCE_CALIBRATION = (0.077272, 0.134539, 0.225688, 0.370326, 0.515721, 0.684158, 1.0, 0.83031, 1.0, 1.0)
+    CHANNEL_IRRADIANCE_CALIBRATION = (0.077272, 0.168174, 0.225688, 0.370326, 0.515721, 0.684158, 1.0, 0.83031, 1.0, 1.0)
     SPECTRUM_GRID = _make_nm_grid(380.0, 780.0, GRID_STEP_NM)
     IR_GRID = _make_nm_grid(760.0, 1000.0, GRID_STEP_NM)
     _VISIBLE_MODEL_CACHE = None
@@ -1364,10 +1364,11 @@ class SpectrometerUI:
         if not self.show_ir:
             tab_w = 54
             tab_h = 26
-            img.draw_rect(x, y, tab_w, tab_h, self.p.panel, -1)
-            img.draw_rect(x, y, tab_w, tab_h, self.p.violet, 1)
-            img.draw_string(x + 8, y + 7, "IR", self.p.violet, 0.66, wrap=False)
-            self.buttons.append((x, y, tab_w, tab_h, "toggle_ir"))
+            tab_x = x + w - tab_w
+            img.draw_rect(tab_x, y, tab_w, tab_h, self.p.panel, -1)
+            img.draw_rect(tab_x, y, tab_w, tab_h, self.p.violet, 1)
+            img.draw_string(tab_x + 8, y + 7, "IR", self.p.violet, 0.66, wrap=False)
+            self.buttons.append((tab_x, y, tab_w, tab_h, "toggle_ir"))
             return
 
         img.draw_rect(x, y, w, h, self.p.panel, -1)
@@ -1483,7 +1484,7 @@ class SpectrometerUI:
                 label += " %dnm" % wavelength
             img.draw_string(x + 24, ry + 2, label, self.p.text, 0.66, wrap=False)
             img.draw_string(x + w - 92, ry + 1, "%5d" % values[idx], color, 0.68, wrap=False)
-            img.draw_string(x + w - 104, ry + 15, "E %6.1f uW" % irradiance[idx], self.p.dim, 0.46, wrap=False)
+            img.draw_string(x + w - 112, ry + 15, "Ecal %5.1f uW" % irradiance[idx], self.p.dim, 0.46, wrap=False)
 
     def _draw_bottom_controls(self, img, running):
         y = self.h - 62
@@ -1767,7 +1768,7 @@ let last=null;
  ctx.strokeStyle='#313f52';ctx.lineWidth=1;for(let i=0;i<5;i++){let y=30+i*(H-70)/4;ctx.beginPath();ctx.moveTo(50,y);ctx.lineTo(W-25,y);ctx.stroke();}
  let g=data.spectrum.grid||[],v=data.spectrum.values||[]; if(g.length>1){let x0=50,y0=H-40,gw=W-80,gh=H-80;for(let i=0;i<g.length-1;i++){let x1=x0+(g[i]-380)*gw/400,x2=x0+(g[i+1]-380)*gw/400,y1=y0-v[i]*gh,y2=y0-v[i+1]*gh;ctx.fillStyle=colorFor(g[i]);ctx.beginPath();ctx.moveTo(x1,y0);ctx.lineTo(x1,y1);ctx.lineTo(x2,y2);ctx.lineTo(x2,y0);ctx.closePath();ctx.fill();}ctx.strokeStyle='#e8eef4';ctx.lineWidth=2;ctx.beginPath();for(let i=0;i<g.length;i++){let x=x0+(g[i]-380)*gw/400,y=y0-v[i]*gh;if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);}ctx.stroke();ctx.fillStyle='#e8eef4';ctx.font='18px Arial';(data.spectrum.peaks||[]).slice(0,5).forEach(p=>{let x=x0+(p.wavelength-380)*gw/400,y=y0-p.value*gh;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill();ctx.fillText(Number(p.wavelength).toFixed(1)+'nm',Math.max(52,Math.min(W-96,x-32)),Math.max(22,y-12));});}
 	 document.getElementById('stats').textContent=modeLabel+' peak '+Number(data.spectrum.dominant_nm||0).toFixed(1)+'nm | centroid '+Number(data.spectrum.centroid_nm||0).toFixed(1)+'nm | Lux~'+Number(data.spectrum.lux_est||0).toFixed(0)+' | fit '+Math.round(data.spectrum.fit_confidence*100)+'% | CCT~'+data.spectrum.cct_est+'K | IR '+(data.spectrum.ir?data.spectrum.ir.relative.toFixed(2):'0');
-	 const ch=document.getElementById('channels');ch.innerHTML='';(data.channels||[]).forEach((it,i)=>{let d=document.createElement('div');d.className='card';d.innerHTML='<b>'+it.name+(it.wavelength?' '+it.wavelength+'nm':'')+'</b><br><span>'+it.corrected+'</span><br><span class="muted small">E '+Number(it.irradiance_uW_cm2||0).toFixed(1)+' uW/cm^2</span><br><span class="muted small">raw '+it.raw+'</span>';ch.appendChild(d);});
+	 const ch=document.getElementById('channels');ch.innerHTML='';(data.channels||[]).forEach((it,i)=>{let d=document.createElement('div');d.className='card';d.innerHTML='<b>'+it.name+(it.wavelength?' '+it.wavelength+'nm':'')+'</b><br><span>'+it.corrected+'</span><br><span class="muted small">Ecal '+Number(it.irradiance_uW_cm2||0).toFixed(1)+' uW/cm^2</span><br><span class="muted small">raw '+it.raw+'</span>';ch.appendChild(d);});
 }
 function tick(){fetch('/api/state').then(r=>r.json()).then(draw).catch(()=>{});}setInterval(tick,700);tick();
 </script></body></html>"""
