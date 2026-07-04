@@ -162,64 +162,66 @@ flowchart TD
 
 ## 物理测量模型
 
-设 `Phi(lambda)` 为到达传感器平面的光谱辐射功率分布，也就是程序希望重建的相对光谱量。AS7341 的每个可见光通道都有一个光谱响应函数 `R_i(lambda)`，它由滤光片、光电二极管、模拟链路和 ADC 响应共同决定。
+设 $\Phi(\lambda)$ 为到达传感器平面的光谱辐射功率分布，也就是程序希望重建的相对光谱量。AS7341 的每个可见光通道都有一个光谱响应函数 $R_i(\lambda)$，它由滤光片、光电二极管、模拟链路和 ADC 响应共同决定。
 
 对第 `i` 个通道，理想连续模型可写为：
 
-```text
-m_i = g * t * integral(R_i(lambda) * Phi(lambda) d_lambda) + d_i + noise_i
-```
+$$
+m_i = g\,t \int R_i(\lambda)\,\Phi(\lambda)\,d\lambda + d_i + n_i
+$$
 
 其中：
 
-- `m_i` 是通道 `i` 的原始 ADC 计数
-- `g` 是传感器增益
-- `t` 是积分时间
-- `d_i` 是暗电流、偏置或暗场基线
-- `noise_i` 包含散粒噪声、读出噪声、量化噪声、I2C 时序和环境波动
-- `R_i(lambda)` 是通道有效光谱响应
-- `Phi(lambda)` 是入射光谱功率分布
+- $m_i$ 是通道 $i$ 的原始 ADC 计数
+- $g$ 是传感器增益
+- $t$ 是积分时间
+- $d_i$ 是暗电流、偏置或暗场基线
+- $n_i$ 包含散粒噪声、读出噪声、量化噪声、I2C 时序和环境波动
+- $R_i(\lambda)$ 是通道有效光谱响应
+- $\Phi(\lambda)$ 是入射光谱功率分布
 
 暗场扣除和曝光归一化后：
 
-```text
-y_i = max(0, m_i - d_i) / (g * t)
-    ~= integral(R_i(lambda) * Phi(lambda) d_lambda)
-```
+$$
+\begin{aligned}
+y_i &= \frac{\max(0,\,m_i-d_i)}{g\,t} \\
+&\approx \int R_i(\lambda)\,\Phi(\lambda)\,d\lambda
+\end{aligned}
+$$
 
 程序还根据 AS7341 的典型响应数据对不同通道做相对灵敏度归一化：
 
-```text
-y'_i = y_i / s_i
-```
+$$
+y'_i = \frac{y_i}{s_i}
+$$
 
-这里 `s_i` 是相对灵敏度因子。它的意义是：相同光功率照射到不同 AS7341 通道时，不会产生相同 ADC 计数，因此必须先消除通道灵敏度差异。
+这里 $s_i$ 是相对灵敏度因子。它的意义是：相同光功率照射到不同 AS7341 通道时，不会产生相同 ADC 计数，因此必须先消除通道灵敏度差异。
 
 ## 离散反问题
 
 连续光谱被离散化到波长网格。本项目使用：
 
-```text
-lambda_j = 380.0 nm, 380.1 nm, ..., 780.0 nm
-```
+$$
+\lambda_j \in \{380.0,\,380.1,\,...,\,780.0\}\ \mathrm{nm}
+$$
 
-设 `x_j` 是 `lambda_j` 上的未知相对辐射功率。通道模型离散后为：
+设 $x_j$ 是 $\lambda_j$ 上的未知相对辐射功率。通道模型离散后为：
 
-```text
-y'_i ~= sum_j A_ij * x_j
-```
+$$
+y'_i \approx \sum_j A_{ij}x_j
+$$
 
 矩阵形式为：
 
-```text
-y ~= A x
-```
+$$
+\mathbf{y} \approx A\mathbf{x}
+$$
 
 其中：
 
-- `y` 是 F1-F8 构成的 8 维可见光通道向量
-- `A` 是由中心波长和 FWHM 构建的响应矩阵
-- `x` 是 0.1 nm 网格上的待重建可见光 SPD
+- $\mathbf{y}$ 是 F1-F8 构成的 8 维可见光通道向量
+- $A$ 是由中心波长和 FWHM 构建的响应矩阵
+- $\mathbf{x}$ 是 0.1 nm 网格上的待重建可见光 SPD
 
 这是一个严重欠定问题：可见光只有 8 个观测量，而 0.1 nm 网格有 4001 个波长点。因此，AS7341 无法唯一恢复真实高分辨率光谱。0.1 nm 表示数值重建和光滑插值网格，不代表传感器具有 0.1 nm 的真实光学分辨率。
 
@@ -227,16 +229,18 @@ y ~= A x
 
 AS7341 数据手册给出了可见光通道的标称中心波长和带宽。程序使用近似高斯带通函数描述每个通道：
 
-```text
-R_i(lambda) = exp(-0.5 * ((lambda - c_i) / sigma_i)^2)
-sigma_i = FWHM_i / 2.355
-```
+$$
+\begin{aligned}
+R_i(\lambda) &= \exp\left[-\frac{1}{2}\left(\frac{\lambda-c_i}{\sigma_i}\right)^2\right] \\
+\sigma_i &= \frac{\mathrm{FWHM}_i}{2.355}
+\end{aligned}
+$$
 
 每一行响应都会归一化：
 
-```text
-A_ij = R_i(lambda_j) / sum_k R_i(lambda_k)
-```
+$$
+A_{ij} = \frac{R_i(\lambda_j)}{\sum_k R_i(\lambda_k)}
+$$
 
 这样构建出的响应矩阵表示每个波长点对每个通道的贡献比例。该模型是近似模型，因为真实传感器响应并非完美高斯函数，而且会受到模块光路、盖板、扩散片、入射角、温度和制造偏差影响。
 
@@ -246,36 +250,41 @@ A_ij = R_i(lambda_j) / sum_k R_i(lambda_k)
 
 光学辐射功率不能为负，因此反演必须满足：
 
-```text
-x_j >= 0
-```
+$$
+x_j \ge 0
+$$
 
 程序使用一种与 Richardson-Lucy 正反卷积思想相近的非负乘法更新：
 
-```text
-prediction_i = sum_j A_ij * x_j
-ratio_i = y_i / max(prediction_i, epsilon)
-x_j <- x_j * weighted_average_i(ratio_i)
-```
+$$
+\begin{aligned}
+\hat{y}_i &= \sum_j A_{ij}x_j \\
+r_i &= \frac{y_i}{\max(\hat{y}_i,\,\epsilon)} \\
+x_j &\leftarrow x_j \cdot \operatorname{weighted\_average}_i(r_i)
+\end{aligned}
+$$
 
 展开后：
 
-```text
-x_j <- x_j * (sum_i A_ij * y_i / prediction_i) / (sum_i A_ij)
-```
+$$
+x_j \leftarrow x_j \cdot
+\frac{\sum_i A_{ij}\,\frac{y_i}{\hat{y}_i}}
+{\sum_i A_{ij}}
+$$
 
 这种更新适合嵌入式 Python：
 
-- 能保持 `x_j` 非负
+- 能保持 $x_j$ 非负
 - 不需要显式矩阵求逆
 - 对少通道传感器比较稳定
 - 可以用简单循环和缓存响应行实现
 
 初始值使用加权反投影：
 
-```text
-x_j_initial = (sum_i A_ij * y_i) / (sum_i A_ij)
-```
+$$
+x_{j,\mathrm{initial}} =
+\frac{\sum_i A_{ij}y_i}{\sum_i A_{ij}}
+$$
 
 随后进行有限轮迭代。更多迭代并不会创造真实高光谱分辨率，反而可能放大噪声和欠定问题。因此当前程序使用保守迭代次数并结合平滑，保证显示的 SPD 更稳定。
 
@@ -285,17 +294,20 @@ x_j_initial = (sum_i A_ij * y_i) / (sum_i A_ij)
 
 第一，平滑抑制窄尖峰。AS7341 可见光通道的 FWHM 是几十 nm，过窄尖峰通常不是传感器真正能分辨的物理结构：
 
-```text
-x <- blend * moving_average(x) + (1 - blend) * x
-```
+$$
+\mathbf{x} \leftarrow
+\beta\,\operatorname{moving\_average}(\mathbf{x}) + (1-\beta)\mathbf{x}
+$$
 
 第二，传感器支持度先验降低弱约束区域的能量：
 
-```text
-support_j = sum_i A_ij
-prior_j = floor + (1 - floor) * normalized_support_j^0.65
-x_j <- x_j * ((1 - alpha) + alpha * prior_j)
-```
+$$
+\begin{aligned}
+\operatorname{support}_j &= \sum_i A_{ij} \\
+\operatorname{prior}_j &= f + (1-f)\,\operatorname{support}_{j,\mathrm{norm}}^{0.65} \\
+x_j &\leftarrow x_j\left[(1-\alpha)+\alpha\,\operatorname{prior}_j\right]
+\end{aligned}
+$$
 
 这对短波边界尤其重要。F1 中心约在 415 nm，380-405 nm 区域缺少独立强约束。如果不加先验，非负迭代可能把能量推到 380 nm 边界并产生假峰。
 
@@ -305,11 +317,14 @@ x_j <- x_j * ((1 - alpha) + alpha * prior_j)
 
 AS7341 Clear 通道响应很宽。它不是窄带光谱通道，但可以作为整体能量约束。程序比较重建 SPD 对 Clear 响应的预测值和实际测得的 Clear 归一化信号：
 
-```text
-clear_measured ~= corrected_Clear / (gain * integration_time)
-clear_predicted = sum_j ClearResponse_j * x_j
-scale = clear_measured / clear_predicted
-```
+$$
+\begin{aligned}
+C_{\mathrm{measured}} &\approx
+\frac{\mathrm{corrected\_Clear}}{g\,t} \\
+C_{\mathrm{predicted}} &= \sum_j C_j x_j \\
+\mathrm{scale} &= \frac{C_{\mathrm{measured}}}{C_{\mathrm{predicted}}}
+\end{aligned}
+$$
 
 这个比例会被限制在一个合理范围内，再用于调整可见光 SPD 幅度。这样可以利用 Clear 的总光强信息，同时避免 Clear 通道过度改变 F1-F8 决定的光谱形状。
 
@@ -321,29 +336,32 @@ NIR 通道不会合并进主可见光 SPD。主 SPD 覆盖 380-780 nm，而 AS73
 
 ## Lux 估算
 
-照度是光度学量，它不是简单光功率，而是按人眼明视觉效率函数 `V(lambda)` 加权后的光通量密度。物理上：
+照度是光度学量，它不是简单光功率，而是按人眼明视觉效率函数 $V(\lambda)$ 加权后的光通量密度。物理上：
 
-```text
-illuminance_lux = 683 * integral(Phi(lambda) * V(lambda) d_lambda)
-```
+$$
+E_v = 683 \int \Phi(\lambda)V(\lambda)\,d\lambda
+$$
 
 程序将同样思想用于重建的相对 SPD：
 
-```text
-lux_est ~= 683 * sum_j relative_power_j * V(lambda_j) * Delta_lambda * SPD_LUX_CALIBRATION
-```
+$$
+\mathrm{lux}_{\mathrm{est}} \approx
+683 \sum_j p_j V(\lambda_j)\Delta\lambda \cdot K_{\mathrm{SPD}}
+$$
 
 默认 `SPD_LUX_CALIBRATION` 为 `0.02`，相当于把原始明视觉积分缩小约 50 倍。这仍然是估算值。若需要绝对 Lux，必须使用标准照度计重新标定：
 
-```text
-SPD_LUX_CALIBRATION_new = reference_lux / displayed_lux_est
-```
+$$
+K_{\mathrm{SPD,new}} =
+\frac{\mathrm{reference\_lux}}{\mathrm{displayed\_lux}_{\mathrm{est}}}
+$$
 
 CSV 同时记录：
 
-```text
-clear_lux_signal = corrected_Clear / (gain * integration_ms)
-```
+$$
+\mathrm{clear\_lux\_signal} =
+\frac{\mathrm{corrected\_Clear}}{g\,t_{\mathrm{ms}}}
+$$
 
 这样用户可以比较 SPD 明视觉积分和 Clear 通道代理量，也可以在自己的光路条件下建立更适合的照度标定曲线。
 
@@ -351,9 +369,9 @@ clear_lux_signal = corrected_Clear / (gain * integration_ms)
 
 单个光子的能量为：
 
-```text
-E_photon = h * c / lambda
-```
+$$
+E_{\mathrm{photon}} = \frac{hc}{\lambda}
+$$
 
 这个关系在将辐射功率谱转换为光子通量谱时非常重要，例如植物照明中的 PPFD。但本项目当前的主 SPD 是相对辐射功率谱，AS7341 的响应模型也已经是在光功率响应意义上建立的。如果再对主图额外套用 `1/lambda` 或 `lambda` 修正，会改变曲线物理含义，并可能再次抬高或压低短波端。
 
@@ -363,9 +381,9 @@ E_photon = h * c / lambda
 - CSV 的 `relative_power` 保存同一类相对功率谱
 - 如需光子通量，可在导出数据上另行转换：
 
-```text
-photon_flux_relative(lambda) proportional to relative_power(lambda) * lambda
-```
+$$
+\Phi_{\mathrm{photon,rel}}(\lambda) \propto p_{\mathrm{rel}}(\lambda)\lambda
+$$
 
 ## 峰值检测
 
@@ -422,12 +440,14 @@ CSV 会导出每一个 0.1 nm 点。GUI 和 WebUI 则绘制降采样后的视觉
 
 设备级标定矩阵可概念化写为：
 
-```text
-y_calibrated = C_channel * y_measured
-x_reconstructed = inverse_model(y_calibrated)
-```
+$$
+\begin{aligned}
+\mathbf{y}_{\mathrm{calibrated}} &= C_{\mathrm{channel}}\mathbf{y}_{\mathrm{measured}} \\
+\mathbf{x}_{\mathrm{reconstructed}} &= \operatorname{inverse\_model}(\mathbf{y}_{\mathrm{calibrated}})
+\end{aligned}
+$$
 
-其中 `C_channel` 用于补偿通道增益、光路响应、扩散片透过率和传感器模块差异。
+其中 $C_{\mathrm{channel}}$ 用于补偿通道增益、光路响应、扩散片透过率和传感器模块差异。
 
 ## 局限性
 

@@ -162,64 +162,66 @@ flowchart TD
 
 ## Physical Measurement Model
 
-Let `Phi(lambda)` be the spectral radiant power distribution arriving at the sensor plane. It is the quantity the application tries to reconstruct up to a relative scale. Each AS7341 visible channel has a spectral response function `R_i(lambda)`, determined by its optical filter, photodiode behavior, and analog/electrical gain path.
+Let $\Phi(\lambda)$ be the spectral radiant power distribution arriving at the sensor plane. It is the quantity the application tries to reconstruct up to a relative scale. Each AS7341 visible channel has a spectral response function $R_i(\lambda)$, determined by its optical filter, photodiode behavior, and analog/electrical gain path.
 
 For channel `i`, the ideal continuous measurement can be modeled as:
 
-```text
-m_i = g * t * integral(R_i(lambda) * Phi(lambda) d_lambda) + d_i + noise_i
-```
+$$
+m_i = g\,t \int R_i(\lambda)\,\Phi(\lambda)\,d\lambda + d_i + n_i
+$$
 
 Where:
 
-- `m_i` is the raw ADC count for channel `i`
-- `g` is sensor gain
-- `t` is integration time
-- `d_i` is the dark offset or dark baseline
-- `noise_i` includes shot noise, read noise, quantization noise, I2C timing effects, and environment variation
-- `R_i(lambda)` is the effective spectral response of the channel
-- `Phi(lambda)` is the incident spectral power distribution at the sensor
+- $m_i$ is the raw ADC count for channel $i$
+- $g$ is sensor gain
+- $t$ is integration time
+- $d_i$ is the dark offset or dark baseline
+- $n_i$ includes shot noise, read noise, quantization noise, I2C timing effects, and environment variation
+- $R_i(\lambda)$ is the effective spectral response of the channel
+- $\Phi(\lambda)$ is the incident spectral power distribution at the sensor
 
 After dark subtraction and exposure normalization:
 
-```text
-y_i = max(0, m_i - d_i) / (g * t)
-    ~= integral(R_i(lambda) * Phi(lambda) d_lambda)
-```
+$$
+\begin{aligned}
+y_i &= \frac{\max(0,\,m_i-d_i)}{g\,t} \\
+&\approx \int R_i(\lambda)\,\Phi(\lambda)\,d\lambda
+\end{aligned}
+$$
 
 The application also applies a per-channel sensitivity normalization from typical AS7341 response data, producing a corrected channel vector:
 
-```text
-y'_i = y_i / s_i
-```
+$$
+y'_i = \frac{y_i}{s_i}
+$$
 
-Here `s_i` is a relative sensitivity scale. This is necessary because the same optical power does not produce the same ADC count in all AS7341 channels.
+Here $s_i$ is a relative sensitivity scale. This is necessary because the same optical power does not produce the same ADC count in all AS7341 channels.
 
 ## Discrete Inverse Problem
 
 The continuous spectrum is discretized onto a wavelength grid. In this project:
 
-```text
-lambda_j = 380.0 nm, 380.1 nm, ..., 780.0 nm
-```
+$$
+\lambda_j \in \{380.0,\,380.1,\,...,\,780.0\}\ \mathrm{nm}
+$$
 
-Let `x_j` be the unknown relative radiant power at `lambda_j`. The channel model becomes:
+Let $x_j$ be the unknown relative radiant power at $\lambda_j$. The channel model becomes:
 
-```text
-y'_i ~= sum_j A_ij * x_j
-```
+$$
+y'_i \approx \sum_j A_{ij}x_j
+$$
 
 In matrix form:
 
-```text
-y ~= A x
-```
+$$
+\mathbf{y} \approx A\mathbf{x}
+$$
 
 Where:
 
-- `y` is the 8-element visible channel vector from F1-F8
-- `A` is the response matrix built from channel center wavelength and FWHM
-- `x` is the reconstructed visible SPD on the 0.1 nm grid
+- $\mathbf{y}$ is the 8-element visible channel vector from F1-F8
+- $A$ is the response matrix built from channel center wavelength and FWHM
+- $\mathbf{x}$ is the reconstructed visible SPD on the 0.1 nm grid
 
 This system is underdetermined: there are only 8 visible measurements and 4001 wavelength grid points. Therefore, a unique high-resolution true spectrum cannot be recovered from the AS7341 alone. The 0.1 nm grid should be understood as a smooth interpolation and numerical representation of a low-dimensional inverse estimate, not as real 0.1 nm optical resolving power.
 
@@ -227,16 +229,18 @@ This system is underdetermined: there are only 8 visible measurements and 4001 w
 
 The AS7341 datasheet provides nominal center wavelengths and bandwidths for visible channels. The implementation approximates each channel response as a Gaussian-like band:
 
-```text
-R_i(lambda) = exp(-0.5 * ((lambda - c_i) / sigma_i)^2)
-sigma_i = FWHM_i / 2.355
-```
+$$
+\begin{aligned}
+R_i(\lambda) &= \exp\left[-\frac{1}{2}\left(\frac{\lambda-c_i}{\sigma_i}\right)^2\right] \\
+\sigma_i &= \frac{\mathrm{FWHM}_i}{2.355}
+\end{aligned}
+$$
 
 Each row is normalized:
 
-```text
-A_ij = R_i(lambda_j) / sum_k R_i(lambda_k)
-```
+$$
+A_{ij} = \frac{R_i(\lambda_j)}{\sum_k R_i(\lambda_k)}
+$$
 
 This produces a numerical response matrix whose rows represent how much each wavelength contributes to each channel. The model is approximate, because real sensor responses are not perfect Gaussians and vary with module optics, cover glass, diffuser, angle, temperature, and manufacturing tolerance.
 
@@ -246,36 +250,41 @@ For speed, the code stores sparse response rows. Very small Gaussian tails are t
 
 The reconstruction requires non-negativity because optical radiant power cannot be negative:
 
-```text
-x_j >= 0
-```
+$$
+x_j \ge 0
+$$
 
 The implementation uses a multiplicative update similar in spirit to Richardson-Lucy style positive inverse methods:
 
-```text
-prediction_i = sum_j A_ij * x_j
-ratio_i = y_i / max(prediction_i, epsilon)
-x_j <- x_j * weighted_average_i(ratio_i)
-```
+$$
+\begin{aligned}
+\hat{y}_i &= \sum_j A_{ij}x_j \\
+r_i &= \frac{y_i}{\max(\hat{y}_i,\,\epsilon)} \\
+x_j &\leftarrow x_j \cdot \operatorname{weighted\_average}_i(r_i)
+\end{aligned}
+$$
 
 In expanded form, the update is:
 
-```text
-x_j <- x_j * (sum_i A_ij * y_i / prediction_i) / (sum_i A_ij)
-```
+$$
+x_j \leftarrow x_j \cdot
+\frac{\sum_i A_{ij}\,\frac{y_i}{\hat{y}_i}}
+{\sum_i A_{ij}}
+$$
 
 This update has useful properties for embedded use:
 
-- It keeps `x_j` non-negative.
+- It keeps $x_j$ non-negative.
 - It avoids matrix inversion.
 - It is stable with a small number of sensor channels.
 - It can be implemented with simple loops and cached response rows.
 
 The application starts from an initial weighted estimate:
 
-```text
-x_j_initial = (sum_i A_ij * y_i) / (sum_i A_ij)
-```
+$$
+x_{j,\mathrm{initial}} =
+\frac{\sum_i A_{ij}y_i}{\sum_i A_{ij}}
+$$
 
 Then it performs a limited number of iterations. More iterations do not create true higher optical resolution; they mainly sharpen the numerical estimate and can amplify noise. The current code uses a conservative iteration count and smoothing to keep the displayed SPD stable.
 
@@ -285,17 +294,20 @@ Because the inverse problem is underdetermined, regularization is essential. The
 
 First, smoothing suppresses narrow numerical spikes that cannot be justified by AS7341 channel bandwidths:
 
-```text
-x <- blend * moving_average(x) + (1 - blend) * x
-```
+$$
+\mathbf{x} \leftarrow
+\beta\,\operatorname{moving\_average}(\mathbf{x}) + (1-\beta)\mathbf{x}
+$$
 
 Second, a sensor-support prior reduces confidence where the sum of channel responses is weak:
 
-```text
-support_j = sum_i A_ij
-prior_j = floor + (1 - floor) * normalized_support_j^0.65
-x_j <- x_j * ((1 - alpha) + alpha * prior_j)
-```
+$$
+\begin{aligned}
+\operatorname{support}_j &= \sum_i A_{ij} \\
+\operatorname{prior}_j &= f + (1-f)\,\operatorname{support}_{j,\mathrm{norm}}^{0.65} \\
+x_j &\leftarrow x_j\left[(1-\alpha)+\alpha\,\operatorname{prior}_j\right]
+\end{aligned}
+$$
 
 This is especially important at the low-wavelength boundary. F1 is centered near 415 nm, so the 380-405 nm region has weak independent support. Without a support prior, the inverse update can push energy toward the boundary and create false 380 nm peaks.
 
@@ -305,11 +317,14 @@ Third, peak detection ignores candidate peaks in regions with insufficient suppo
 
 The AS7341 Clear channel has a broad response. It is not a spectral channel, but it is useful as a global energy constraint. The implementation compares the reconstructed SPD's predicted Clear response with the measured Clear-normalized signal:
 
-```text
-clear_measured ~= corrected_Clear / (gain * integration_time)
-clear_predicted = sum_j ClearResponse_j * x_j
-scale = clear_measured / clear_predicted
-```
+$$
+\begin{aligned}
+C_{\mathrm{measured}} &\approx
+\frac{\mathrm{corrected\_Clear}}{g\,t} \\
+C_{\mathrm{predicted}} &= \sum_j C_j x_j \\
+\mathrm{scale} &= \frac{C_{\mathrm{measured}}}{C_{\mathrm{predicted}}}
+\end{aligned}
+$$
 
 The scale factor is clamped to a bounded range before being applied to the visible SPD. This prevents Clear from overwhelming the spectral shape while still making the reconstructed amplitude more consistent with the total broadband light level.
 
@@ -321,29 +336,32 @@ Instead, the application reconstructs a separate NIR estimate over 760-1000 nm u
 
 ## Lux Estimate
 
-Illuminance is a photometric quantity. It weights optical power by the human photopic luminous efficiency curve `V(lambda)`. In physical radiometry and photometry:
+Illuminance is a photometric quantity. It weights optical power by the human photopic luminous efficiency curve $V(\lambda)$. In physical radiometry and photometry:
 
-```text
-illuminance_lux = 683 * integral(Phi(lambda) * V(lambda) d_lambda)
-```
+$$
+E_v = 683 \int \Phi(\lambda)V(\lambda)\,d\lambda
+$$
 
 The code applies the same idea to the reconstructed relative SPD:
 
-```text
-lux_est ~= 683 * sum_j relative_power_j * V(lambda_j) * Delta_lambda * SPD_LUX_CALIBRATION
-```
+$$
+\mathrm{lux}_{\mathrm{est}} \approx
+683 \sum_j p_j V(\lambda_j)\Delta\lambda \cdot K_{\mathrm{SPD}}
+$$
 
 The default `SPD_LUX_CALIBRATION` is `0.02`, which scales the raw photopic integral down by about 50x based on observed behavior. This is still an estimate. For absolute Lux, the system must be calibrated with a reference lux meter:
 
-```text
-SPD_LUX_CALIBRATION_new = reference_lux / displayed_lux_est
-```
+$$
+K_{\mathrm{SPD,new}} =
+\frac{\mathrm{reference\_lux}}{\mathrm{displayed\_lux}_{\mathrm{est}}}
+$$
 
 The CSV also records:
 
-```text
-clear_lux_signal = corrected_Clear / (gain * integration_ms)
-```
+$$
+\mathrm{clear\_lux\_signal} =
+\frac{\mathrm{corrected\_Clear}}{g\,t_{\mathrm{ms}}}
+$$
 
 This allows users to compare SPD-derived Lux with a Clear-channel proxy and build their own calibration curve if their optical setup makes Clear more reliable.
 
@@ -351,9 +369,9 @@ This allows users to compare SPD-derived Lux with a Clear-channel proxy and buil
 
 Photon energy is:
 
-```text
-E_photon = h * c / lambda
-```
+$$
+E_{\mathrm{photon}} = \frac{hc}{\lambda}
+$$
 
 This relation is required when converting radiant power spectra into photon flux spectra, such as PPFD for plant lighting. However, the AS7341 response model used here is already based on channel response to optical power. Applying an additional `1/lambda` or `lambda` correction to the main radiant-power SPD would change the physical meaning of the plot and can overcorrect short wavelengths.
 
@@ -363,9 +381,9 @@ Therefore:
 - CSV `relative_power` stores the same radiant-power-like reconstruction.
 - Photon flux should be derived later from exported data if needed:
 
-```text
-photon_flux_relative(lambda) proportional to relative_power(lambda) * lambda
-```
+$$
+\Phi_{\mathrm{photon,rel}}(\lambda) \propto p_{\mathrm{rel}}(\lambda)\lambda
+$$
 
 ## Peak Detection
 
@@ -422,12 +440,14 @@ Second, optical calibration:
 
 A proper calibration matrix can be written conceptually as:
 
-```text
-y_calibrated = C_channel * y_measured
-x_reconstructed = inverse_model(y_calibrated)
-```
+$$
+\begin{aligned}
+\mathbf{y}_{\mathrm{calibrated}} &= C_{\mathrm{channel}}\mathbf{y}_{\mathrm{measured}} \\
+\mathbf{x}_{\mathrm{reconstructed}} &= \operatorname{inverse\_model}(\mathbf{y}_{\mathrm{calibrated}})
+\end{aligned}
+$$
 
-Where `C_channel` corrects channel gain, optical path response, diffuser transmission, and sensor-module variation.
+Where $C_{\mathrm{channel}}$ corrects channel gain, optical path response, diffuser transmission, and sensor-module variation.
 
 ## Limitations
 
