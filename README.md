@@ -56,6 +56,7 @@ flowchart LR
 - GPIO open-drain software I2C on B20/B19 for the current wiring
 - Dark baseline zeroing, gain control, integration-time control, pause/run, CSV save, and exit controls
 - 380-780 nm visible relative SPD reconstruction with a 0.1 nm internal grid and filled area plot
+- Default photon-count SPD display with a Photon/Power toggle on both GUI and WebUI
 - Automatic visible-spectrum peak annotation, up to 5 peak wavelengths
 - Separate 760-1000 nm IR estimate window, hidden by default and toggled by the top-right `IR` tab
 - Lightweight WebUI on port `2932` for remote control, spectrum viewing, and CSV download
@@ -106,6 +107,7 @@ For MaixVision or the MaixPy runner, running `main.py` is recommended to avoid m
    - `Zero`: Capture the current dark baseline
    - `Gain -/+`: Adjust AS7341 analog gain
    - `Int -/+`: Adjust integration time
+   - `Photon` / `Power`: Switch the main SPD plot between integrated photon-count and radiant-power views
    - `Save`: Append the current sample to `as7341_spectrum_long.csv`
    - `Exit`: Exit the application
 5. Tap the top-right `IR` tab to show or hide the IR estimate window.
@@ -124,7 +126,7 @@ The WebUI supports:
 
 - Live 380-780 nm visible SPD filled curve and peak labels
 - Raw and corrected values for each AS7341 channel
-- Remote `Run/Pause`, `Zero`, `Gain -/+`, `Int -/+`, `Save`, and `Exit`
+- Remote `Run/Pause`, `Zero`, `Photon/Power`, `Gain -/+`, `Int -/+`, `Save`, and `Exit`
 - Direct `Download CSV` export of `as7341_spectrum_long.csv`
 
 If the web service fails to start, the local touchscreen application still works.
@@ -370,7 +372,7 @@ $$
 
 This allows users to compare SPD-derived Lux with a Clear-channel proxy and build their own calibration curve if their optical setup makes Clear more reliable.
 
-## Why Wavelength-energy Correction Is Not Applied to the Main SPD
+## Radiant-power and Photon-count SPD
 
 Photon energy is:
 
@@ -378,17 +380,20 @@ $$
 E_{\mathrm{photon}} = \frac{hc}{\lambda}
 $$
 
-This relation is required when converting radiant power spectra into photon flux spectra, such as PPFD for plant lighting. However, the AS7341 response model used here is already based on channel response to optical power. Applying an additional $1/\lambda$ or $\lambda$ correction to the main radiant-power SPD would change the physical meaning of the plot and can overcorrect short wavelengths.
-
-Therefore:
-
-- The GUI and WebUI display relative radiant-power SPD.
-- CSV `relative_power` stores the same radiant-power-like reconstruction.
-- Photon flux should be derived later from exported data if needed:
+This relation is required when converting radiant-power spectra into photon-flux or photon-count spectra, such as PPFD for plant lighting. The AS7341 response model used here first reconstructs a radiant-power-like SPD because the channel responses are modeled as optical-power responses. A separate photon-count view is then computed from that reconstruction:
 
 $$
-\Phi_{\mathrm{photon,rel}}(\lambda) \propto p_{\mathrm{rel}}(\lambda)\lambda
+q_{\mathrm{rel}}(\lambda) \propto p_{\mathrm{rel}}(\lambda)\lambda
 $$
+
+The application keeps both meanings separate:
+
+- GUI and WebUI default to photon-count SPD and can toggle back to radiant-power SPD.
+- CSV `relative_power` stores the radiant-power reconstruction.
+- CSV `relative_photon_count` stores the wavelength-weighted photon-count proxy, and `photon_relative_intensity` stores its normalized plot value.
+- `lux_est` remains a photopic radiant-power estimate using $V(\lambda)$; it is not computed from photon-count SPD.
+
+This avoids applying a wavelength-energy correction directly to the physical meaning of the radiant-power plot while still making photon-count analysis immediately available.
 
 ## Peak Detection
 
@@ -421,8 +426,9 @@ Pressing `Save` appends data to `as7341_spectrum_long.csv`. The export uses a lo
 - Timestamp, gain, integration time, and saturation state
 - Raw, dark, corrected, and normalized data for all 10 exported channels
 - Visible SPD summary: dominant wavelength, centroid, estimated CCT, fit confidence, and peak list
-- `kind,wavelength_nm,relative_intensity,relative_power`
+- `kind,wavelength_nm,relative_intensity,relative_power,photon_relative_intensity,relative_photon_count`
 - `lux_est,lux_source,clear_lux_signal`
+- Photon summary fields: `photon_integral,photon_dominant_nm,photon_centroid_nm,photon_peaks_nm`
 - Full 0.1 nm visible SPD data over 380-780 nm
 - Full 0.1 nm IR estimate data over 760-1000 nm
 

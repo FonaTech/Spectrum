@@ -592,6 +592,7 @@ class AS7341:
         fit_error = self._fit_error(prediction, ycorr)
         summary = self._spectrum_summary(grid, x, corrected, fit_error, exposure, peak_support)
         summary["peaks"] = self._find_spectrum_peaks(grid, summary["values"], peak_support, limit=5)
+        summary["photon_peaks"] = self._find_spectrum_peaks(grid, summary["photon_values"], peak_support, limit=5)
         summary["ir"] = self._reconstruct_ir(corrected, exposure)
         return summary
 
@@ -600,8 +601,13 @@ class AS7341:
             "grid": list(grid),
             "values": [0.0 for _ in grid],
             "power": [0.0 for _ in grid],
+            "photon_values": [0.0 for _ in grid],
+            "photon_power": [0.0 for _ in grid],
+            "photon_integral": 0.0,
             "dominant_nm": 0,
             "centroid_nm": 0,
+            "photon_dominant_nm": 0,
+            "photon_centroid_nm": 0,
             "lux_est": 0.0,
             "clear_lux_signal": 0.0,
             "lux_source": "spd_photopic",
@@ -610,6 +616,7 @@ class AS7341:
             "clear_ratio": 0.0,
             "fit_confidence": 0.0,
             "peaks": [],
+            "photon_peaks": [],
             "ir": {
                 "grid": list(self.IR_GRID),
                 "values": [0.0 for _ in self.IR_GRID],
@@ -799,7 +806,15 @@ class AS7341:
     def _spectrum_summary(self, grid, power, corrected, fit_error, exposure, peak_support=None):
         max_power = max(max(power), 1e-12)
         values = [value / max_power for value in power]
+        photon_power = []
+        for wavelength, value in zip(grid, power):
+            photon_power.append(max(0.0, float(value)) * max(0.0, float(wavelength)))
+        max_photon = max(max(photon_power), 1e-12)
+        photon_values = [value / max_photon for value in photon_power]
+        delta_nm = abs(float(grid[1]) - float(grid[0])) if len(grid) > 1 else 1.0
+        photon_integral = sum(photon_power) * delta_nm
         visible_pairs = [(w, p) for w, p in zip(grid, power) if w <= 780]
+        photon_pairs = [(w, p) for w, p in zip(grid, photon_power) if w <= 780]
         visible_total = sum([p for _, p in visible_pairs])
         if visible_total > 0:
             centroid = sum([w * p for w, p in visible_pairs]) / visible_total
@@ -818,6 +833,24 @@ class AS7341:
             centroid = 0
             dominant_nm = 0
 
+        photon_total = sum([p for _, p in photon_pairs])
+        if photon_total > 0:
+            photon_centroid = sum([w * p for w, p in photon_pairs]) / photon_total
+            photon_dominant_nm = 0
+            photon_dominant_power = -1.0
+            for index, item in enumerate(photon_pairs):
+                wavelength, value = item
+                if peak_support and index < len(peak_support) and peak_support[index] < self.PEAK_SUPPORT_MIN:
+                    continue
+                if value > photon_dominant_power:
+                    photon_dominant_nm = wavelength
+                    photon_dominant_power = value
+            if photon_dominant_power < 0:
+                photon_dominant_nm = photon_pairs[0][0]
+        else:
+            photon_centroid = 0
+            photon_dominant_nm = 0
+
         blue = sum([p for w, p in visible_pairs if w < 500])
         green = sum([p for w, p in visible_pairs if w >= 500 and w < 600])
         red = sum([p for w, p in visible_pairs if w >= 600])
@@ -835,8 +868,13 @@ class AS7341:
             "grid": list(grid),
             "values": values,
             "power": power,
+            "photon_values": photon_values,
+            "photon_power": photon_power,
+            "photon_integral": photon_integral,
             "dominant_nm": round(float(dominant_nm), 1),
             "centroid_nm": round(float(centroid), 1),
+            "photon_dominant_nm": round(float(photon_dominant_nm), 1),
+            "photon_centroid_nm": round(float(photon_centroid), 1),
             "lux_est": lux_est,
             "clear_lux_signal": clear_lux_signal,
             "lux_source": "spd_photopic",
@@ -1053,6 +1091,7 @@ class SpectrometerUI:
         self.history = []
         self.max_history = 80
         self.show_ir = False
+        self.spectrum_mode = "photon"
 
     def make_image(self):
         return image.Image(self.w, self.h, image.Format.FMT_RGB888, self.p.bg)
@@ -1127,9 +1166,11 @@ class SpectrometerUI:
             )
             spectrum = sample.get("spectrum", {})
             if spectrum:
-                info = "SPD peak %s   centroid %s   Lux~%.0f" % (
-                    self._format_nm(spectrum.get("dominant_nm", 0)),
-                    self._format_nm(spectrum.get("centroid_nm", 0)),
+                plot = self._spectrum_for_mode(spectrum)
+                info = "%s peak %s   centroid %s   Lux~%.0f" % (
+                    plot["label"],
+                    self._format_nm(plot.get("dominant_nm", 0)),
+                    self._format_nm(plot.get("centroid_nm", 0)),
                     spectrum.get("lux_est", 0),
                 )
             if sample.get("saturated"):
@@ -1146,8 +1187,10 @@ class SpectrometerUI:
     def _draw_graph(self, img, rect, sample):
         x, y, w, h = rect
         self._panel(img, x, y, w, h)
-        img.draw_string(x + 16, y + 12, "Reconstructed SPD", self.p.text, 1.05)
-        img.draw_string(x + w - 156, y + 15, "relative 380-780nm", self.p.muted, 0.72)
+        title = "Photon-count SPD" if self.spectrum_mode == "photon" else "Radiant-power SPD"
+        subtitle = "relative photons 380-780nm" if self.spectrum_mode == "photon" else "relative power 380-780nm"
+        img.draw_string(x + 16, y + 12, title, self.p.text, 1.05)
+        img.draw_string(x + w - 178, y + 15, subtitle, self.p.muted, 0.62)
 
         gx = x + 40
         gy = y + 48
@@ -1157,22 +1200,45 @@ class SpectrometerUI:
 
         spectrum = sample.get("spectrum", {}) if sample else {}
         if spectrum and spectrum.get("values"):
-            self._draw_spd_curve(img, gx, gy, gw, gh, spectrum)
+            plot_spectrum = self._spectrum_for_mode(spectrum)
+            self._draw_spd_curve(img, gx, gy, gw, gh, plot_spectrum)
             self._draw_channel_markers(img, gx, gy, gw, gh, sample)
             self._draw_ir_window(img, gx + gw - 146, gy + 8, 136, 88, spectrum.get("ir", {}))
-            peaks = spectrum.get("peaks", [])
+            peaks = plot_spectrum.get("peaks", [])
             if peaks:
                 labels = "Peaks " + " ".join([self._format_nm(p["wavelength"]) for p in peaks[:5]])
                 img.draw_string(gx, gy + gh + 30, labels[:54], self.p.text, 0.72, wrap=False)
-            fit = "Fit %.0f%%  CCT~%dK  Lux~%.0f" % (
+            fit = "%s | Fit %.0f%%  CCT~%dK  Lux~%.0f" % (
+                plot_spectrum["label"],
                 spectrum.get("fit_confidence", 0) * 100,
                 spectrum.get("cct_est", 0),
                 spectrum.get("lux_est", 0),
             )
-            img.draw_string(gx + gw - 170, gy - 25, fit, self.p.muted, 0.58, wrap=False)
+            img.draw_string(gx + gw - 210, gy - 25, fit, self.p.muted, 0.56, wrap=False)
         else:
             img.draw_string(gx + 16, gy + int(gh / 2) - 8, "waiting for reconstructed spectrum", self.p.dim, 0.72)
         self._draw_history(img, x + 18, y + h - 38, w - 36, 20)
+
+    def _spectrum_for_mode(self, spectrum):
+        if self.spectrum_mode == "photon":
+            out = {
+                "grid": spectrum.get("grid", []),
+                "values": spectrum.get("photon_values", spectrum.get("values", [])),
+                "peaks": spectrum.get("photon_peaks", spectrum.get("peaks", [])),
+                "dominant_nm": spectrum.get("photon_dominant_nm", spectrum.get("dominant_nm", 0)),
+                "centroid_nm": spectrum.get("photon_centroid_nm", spectrum.get("centroid_nm", 0)),
+                "label": "Photon",
+            }
+        else:
+            out = {
+                "grid": spectrum.get("grid", []),
+                "values": spectrum.get("values", []),
+                "peaks": spectrum.get("peaks", []),
+                "dominant_nm": spectrum.get("dominant_nm", 0),
+                "centroid_nm": spectrum.get("centroid_nm", 0),
+                "label": "Power",
+            }
+        return out
 
     def _draw_spd_curve(self, img, x, y, w, h, spectrum):
         grid = spectrum.get("grid", [])
@@ -1325,6 +1391,16 @@ class SpectrometerUI:
         x, y, w, h = rect
         self._panel(img, x, y, w, h)
         img.draw_string(x + 14, y + 12, "Channels", self.p.text, 1.0)
+        mode_label = "Photon" if self.spectrum_mode == "photon" else "Power"
+        mode_color = self.p.accent if self.spectrum_mode == "photon" else self.p.warn
+        btn_w = 78
+        btn_h = 24
+        btn_x = x + 108
+        btn_y = y + 10
+        img.draw_rect(btn_x, btn_y, btn_w, btn_h, mode_color, -1)
+        img.draw_rect(btn_x, btn_y, btn_w, btn_h, self.p.text, 1)
+        img.draw_string(btn_x + 9, btn_y + 7, mode_label, self.p.bg, 0.58, wrap=False)
+        self.buttons.append((btn_x, btn_y, btn_w, btn_h, "toggle_spectrum_mode"))
         values = sample.get("corrected", [0] * 10) if sample else [0] * 10
         raw = sample.get("raw", [0] * 10) if sample else [0] * 10
         channels = sample.get("channels", []) if sample else []
@@ -1596,8 +1672,9 @@ body{margin:0;background:#0a0e14;color:#e8eef4;font-family:Arial,Helvetica,sans-
 .top{display:flex;justify-content:space-between;gap:12px;align-items:center}
 h1{font-size:24px;margin:0}.status{color:#8c98a6;font-size:14px}
 .panel{background:#121822;border:1px solid #313f52;padding:14px;margin-top:14px}
-button,a.btn{background:#18202c;border:1px solid #5f6f82;color:#e8eef4;padding:10px 12px;margin:4px;text-decoration:none;display:inline-block}
-button.primary{background:#26beaa;color:#07100f}.good{background:#5ed684;color:#07100f}.danger{background:#ee5d5d}
+	button,a.btn{background:#18202c;border:1px solid #5f6f82;color:#e8eef4;padding:10px 12px;margin:4px;text-decoration:none;display:inline-block}
+	button.primary{background:#26beaa;color:#07100f}.good{background:#5ed684;color:#07100f}.danger{background:#ee5d5d}
+	button.photon{background:#26beaa;color:#07100f}button.power{background:#ffb04c;color:#07100f}
 canvas{width:100%;height:360px;background:#18202c;display:block}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}.card{background:#18202c;border:1px solid #313f52;padding:8px}
 .muted{color:#8c98a6}.small{font-size:12px}
@@ -1606,9 +1683,10 @@ canvas{width:100%;height:360px;background:#18202c;display:block}
 <body><div class="wrap">
 <div class="top"><div><h1>AS7341 Spectrometer</h1><div id="status" class="status">connecting</div></div><a class="btn" href="/download.csv">Download CSV</a></div>
 <div class="panel"><canvas id="plot" width="1000" height="360"></canvas><div id="stats" class="status"></div></div>
-<div class="panel">
-<button id="run" class="primary">Run/Pause</button><button onclick="act('zero')">Zero</button>
-<button onclick="act('gain_down')">Gain -</button><button onclick="act('gain_up')">Gain +</button>
+	<div class="panel">
+	<button id="run" class="primary">Run/Pause</button><button onclick="act('zero')">Zero</button>
+	<button id="mode" class="photon">Photon SPD</button>
+	<button onclick="act('gain_down')">Gain -</button><button onclick="act('gain_up')">Gain +</button>
 <button onclick="act('int_down')">Int -</button><button onclick="act('int_up')">Int +</button>
 <button onclick="act('save')" class="good">Save</button><button onclick="act('exit')" class="danger">Exit</button>
 </div>
@@ -1616,15 +1694,16 @@ canvas{width:100%;height:360px;background:#18202c;display:block}
 </div>
 <script>
 let last=null;
-function act(name){fetch('/api/action?name='+name).then(r=>r.json()).then(draw).catch(()=>{});}
-document.getElementById('run').onclick=()=>act(last&&last.running?'pause':'run');
-function colorFor(w){if(w<430)return'#765cff';if(w<480)return'#4f82ff';if(w<520)return'#33b7ee';if(w<575)return'#4ada7b';if(w<610)return'#ebd549';if(w<660)return'#ff963f';return'#ff554e'}
-function draw(data){
- last=data; document.getElementById('status').textContent=(data.running?'RUN':'PAUSE')+' | '+data.message+' | gain '+data.gain+'x | '+data.integration_ms.toFixed(0)+'ms';
+	function act(name){fetch('/api/action?name='+name).then(r=>r.json()).then(draw).catch(()=>{});}
+	document.getElementById('run').onclick=()=>act(last&&last.running?'pause':'run');
+	document.getElementById('mode').onclick=()=>act('toggle_spectrum_mode');
+	function colorFor(w){if(w<430)return'#765cff';if(w<480)return'#4f82ff';if(w<520)return'#33b7ee';if(w<575)return'#4ada7b';if(w<610)return'#ebd549';if(w<660)return'#ff963f';return'#ff554e'}
+	function draw(data){
+	 last=data; const mode=data.spectrum_mode||'photon'; const modeLabel=mode==='photon'?'Photon':'Power'; const mb=document.getElementById('mode'); mb.textContent=modeLabel+' SPD'; mb.className=mode==='photon'?'photon':'power'; document.getElementById('status').textContent=(data.running?'RUN':'PAUSE')+' | '+modeLabel+' | '+data.message+' | gain '+data.gain+'x | '+data.integration_ms.toFixed(0)+'ms';
  const c=document.getElementById('plot'),ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.clearRect(0,0,W,H);ctx.fillStyle='#18202c';ctx.fillRect(0,0,W,H);
  ctx.strokeStyle='#313f52';ctx.lineWidth=1;for(let i=0;i<5;i++){let y=30+i*(H-70)/4;ctx.beginPath();ctx.moveTo(50,y);ctx.lineTo(W-25,y);ctx.stroke();}
  let g=data.spectrum.grid||[],v=data.spectrum.values||[]; if(g.length>1){let x0=50,y0=H-40,gw=W-80,gh=H-80;for(let i=0;i<g.length-1;i++){let x1=x0+(g[i]-380)*gw/400,x2=x0+(g[i+1]-380)*gw/400,y1=y0-v[i]*gh,y2=y0-v[i+1]*gh;ctx.fillStyle=colorFor(g[i]);ctx.beginPath();ctx.moveTo(x1,y0);ctx.lineTo(x1,y1);ctx.lineTo(x2,y2);ctx.lineTo(x2,y0);ctx.closePath();ctx.fill();}ctx.strokeStyle='#e8eef4';ctx.lineWidth=2;ctx.beginPath();for(let i=0;i<g.length;i++){let x=x0+(g[i]-380)*gw/400,y=y0-v[i]*gh;if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);}ctx.stroke();ctx.fillStyle='#e8eef4';ctx.font='18px Arial';(data.spectrum.peaks||[]).slice(0,5).forEach(p=>{let x=x0+(p.wavelength-380)*gw/400,y=y0-p.value*gh;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill();ctx.fillText(Number(p.wavelength).toFixed(1)+'nm',Math.max(52,Math.min(W-96,x-32)),Math.max(22,y-12));});}
- document.getElementById('stats').textContent='Peak '+Number(data.spectrum.dominant_nm||0).toFixed(1)+'nm | centroid '+Number(data.spectrum.centroid_nm||0).toFixed(1)+'nm | Lux~'+Number(data.spectrum.lux_est||0).toFixed(0)+' | fit '+Math.round(data.spectrum.fit_confidence*100)+'% | CCT~'+data.spectrum.cct_est+'K | IR '+(data.spectrum.ir?data.spectrum.ir.relative.toFixed(2):'0');
+	 document.getElementById('stats').textContent=modeLabel+' peak '+Number(data.spectrum.dominant_nm||0).toFixed(1)+'nm | centroid '+Number(data.spectrum.centroid_nm||0).toFixed(1)+'nm | Lux~'+Number(data.spectrum.lux_est||0).toFixed(0)+' | fit '+Math.round(data.spectrum.fit_confidence*100)+'% | CCT~'+data.spectrum.cct_est+'K | IR '+(data.spectrum.ir?data.spectrum.ir.relative.toFixed(2):'0');
  const ch=document.getElementById('channels');ch.innerHTML='';(data.channels||[]).forEach((it,i)=>{let d=document.createElement('div');d.className='card';d.innerHTML='<b>'+it.name+(it.wavelength?' '+it.wavelength+'nm':'')+'</b><br><span>'+it.corrected+'</span><br><span class="muted small">raw '+it.raw+'</span>';ch.appendChild(d);});
 }
 function tick(){fetch('/api/state').then(r=>r.json()).then(draw).catch(()=>{});}setInterval(tick,700);tick();
@@ -1651,6 +1730,8 @@ class SpectrometerApp:
         self.retry_after_ms = 0
         self.sample_interval_ms = 60
         self.csv_header_written = False
+        self.spectrum_mode = "photon"
+        self.ui.spectrum_mode = self.spectrum_mode
         self.web = WebServer(self, WEB_PORT)
         self.web_label = self.web.label
 
@@ -1713,6 +1794,7 @@ class SpectrometerApp:
         if self.sensor is None:
             img = self._error_image()
         else:
+            self.ui.spectrum_mode = self.spectrum_mode
             img = self.ui.draw(self.sample, self.sensor, self.running, self.message)
         self.disp.show(img)
 
@@ -1753,6 +1835,9 @@ class SpectrometerApp:
         if action == "exit":
             app.set_exit_flag(True)
             return
+        if action == "toggle_spectrum_mode":
+            self._toggle_spectrum_mode()
+            return
         if self.sensor is None:
             return
         if action == "pause":
@@ -1784,10 +1869,16 @@ class SpectrometerApp:
             "int_down",
             "int_up",
             "save",
+            "toggle_spectrum_mode",
             "exit",
         )
         if action in allowed:
             self._handle_action(action)
+
+    def _toggle_spectrum_mode(self):
+        self.spectrum_mode = "power" if self.spectrum_mode == "photon" else "photon"
+        self.ui.spectrum_mode = self.spectrum_mode
+        self.message = "photon count SPD" if self.spectrum_mode == "photon" else "radiant power SPD"
 
     def web_state(self):
         spectrum = {}
@@ -1824,6 +1915,7 @@ class SpectrometerApp:
             "running": self.running,
             "message": self.message,
             "connected": self.sensor is not None,
+            "spectrum_mode": self.spectrum_mode,
             "gain": self.sample.get("gain", 0) if self.sample else 0,
             "integration_ms": self.sample.get("integration_ms", 0) if self.sample else 0,
             "saturated": self.sample.get("saturated", False) if self.sample else False,
@@ -1835,13 +1927,23 @@ class SpectrometerApp:
         if not spectrum:
             return {}
         ir = spectrum.get("ir", {})
-        grid, values = self._downsample_curve(spectrum.get("grid", []), spectrum.get("values", []), 900)
+        if self.spectrum_mode == "photon":
+            source_values = spectrum.get("photon_values", spectrum.get("values", []))
+            source_peaks = spectrum.get("photon_peaks", spectrum.get("peaks", []))
+            dominant_nm = spectrum.get("photon_dominant_nm", spectrum.get("dominant_nm", 0))
+            centroid_nm = spectrum.get("photon_centroid_nm", spectrum.get("centroid_nm", 0))
+        else:
+            source_values = spectrum.get("values", [])
+            source_peaks = spectrum.get("peaks", [])
+            dominant_nm = spectrum.get("dominant_nm", 0)
+            centroid_nm = spectrum.get("centroid_nm", 0)
+        grid, values = self._downsample_curve(spectrum.get("grid", []), source_values, 900)
         ir_grid, ir_values = self._downsample_curve(ir.get("grid", []), ir.get("values", []), 360)
         return {
             "grid": grid,
             "values": values,
-            "dominant_nm": spectrum.get("dominant_nm", 0),
-            "centroid_nm": spectrum.get("centroid_nm", 0),
+            "dominant_nm": dominant_nm,
+            "centroid_nm": centroid_nm,
             "lux_est": spectrum.get("lux_est", 0),
             "clear_lux_signal": spectrum.get("clear_lux_signal", 0),
             "lux_source": spectrum.get("lux_source", "spd_photopic"),
@@ -1849,7 +1951,7 @@ class SpectrometerApp:
             "nir_ratio": spectrum.get("nir_ratio", 0),
             "clear_ratio": spectrum.get("clear_ratio", 0),
             "fit_confidence": spectrum.get("fit_confidence", 0),
-            "peaks": spectrum.get("peaks", []),
+            "peaks": source_peaks,
             "ir": {
                 "grid": ir_grid,
                 "values": ir_values,
@@ -1968,12 +2070,15 @@ class SpectrometerApp:
             "wavelength_nm",
             "relative_intensity",
             "relative_power",
+            "photon_relative_intensity",
+            "relative_photon_count",
             "lux_est",
             "lux_source",
             "clear_lux_signal",
             "gain",
             "integration_ms",
             "saturated",
+            "active_spectrum_mode",
             "spd_dominant_nm",
             "spd_centroid_nm",
             "spd_cct_est",
@@ -1981,6 +2086,10 @@ class SpectrometerApp:
             "spd_nir_ratio",
             "spd_clear_ratio",
             "spd_peaks_nm",
+            "photon_integral",
+            "photon_dominant_nm",
+            "photon_centroid_nm",
+            "photon_peaks_nm",
             "ir_peak_nm",
             "ir_relative",
         ]
@@ -1994,12 +2103,14 @@ class SpectrometerApp:
         spectrum = sample.get("spectrum", {})
         ir = spectrum.get("ir", {})
         peaks = spectrum.get("peaks", [])
+        photon_peaks = spectrum.get("photon_peaks", [])
         names = [name for name, _ in AS7341.CHANNELS]
         dark = self.sensor.dark if self.sensor else [0] * len(names)
         base = [
             "%.1f" % sample.get("gain", 0),
             "%.2f" % sample.get("integration_ms", 0),
             "1" if sample.get("saturated") else "0",
+            self.spectrum_mode,
             "%.1f" % float(spectrum.get("dominant_nm", 0)),
             "%.1f" % float(spectrum.get("centroid_nm", 0)),
             str(spectrum.get("cct_est", 0)),
@@ -2007,6 +2118,10 @@ class SpectrometerApp:
             "%.4f" % spectrum.get("nir_ratio", 0),
             "%.4f" % spectrum.get("clear_ratio", 0),
             ";".join(["%.1f" % float(p["wavelength"]) for p in peaks[:5]]),
+            "%.9g" % float(spectrum.get("photon_integral", 0)),
+            "%.1f" % float(spectrum.get("photon_dominant_nm", 0)),
+            "%.1f" % float(spectrum.get("photon_centroid_nm", 0)),
+            ";".join(["%.1f" % float(p["wavelength"]) for p in photon_peaks[:5]]),
             "%.1f" % float(ir.get("peak_nm", 0)),
             "%.4f" % ir.get("relative", 0),
         ]
@@ -2024,18 +2139,23 @@ class SpectrometerApp:
             spectrum.get("grid", []),
             spectrum.get("values", []),
             spectrum.get("power", []),
+            spectrum.get("photon_values", []),
+            spectrum.get("photon_power", []),
             lux_est,
             lux_source,
             clear_lux_signal,
             base,
         ):
             yield row
+        ir_photon_values, ir_photon_power = self._photon_curve_from_power(ir.get("grid", []), ir.get("power", []))
         for row in self._iter_spectrum_csv_rows(
             ticks_ms,
             "ir_spd",
             ir.get("grid", []),
             ir.get("values", []),
             ir.get("power", []),
+            ir_photon_values,
+            ir_photon_power,
             lux_est,
             lux_source,
             clear_lux_signal,
@@ -2043,16 +2163,42 @@ class SpectrometerApp:
         ):
             yield row
 
-    def _iter_spectrum_csv_rows(self, ticks_ms, kind, grid, values, power, lux_est, lux_source, clear_lux_signal, base):
+    def _photon_curve_from_power(self, grid, power):
+        limit = min(len(grid), len(power))
+        photon_power = []
+        for index in range(limit):
+            photon_power.append(max(0.0, float(power[index])) * max(0.0, float(grid[index])))
+        max_photon = max(max(photon_power), 1e-12) if photon_power else 1e-12
+        photon_values = [value / max_photon for value in photon_power]
+        return photon_values, photon_power
+
+    def _iter_spectrum_csv_rows(
+        self,
+        ticks_ms,
+        kind,
+        grid,
+        values,
+        power,
+        photon_values,
+        photon_power,
+        lux_est,
+        lux_source,
+        clear_lux_signal,
+        base,
+    ):
         limit = min(len(grid), len(values))
         for index in range(limit):
             relative_power = power[index] if index < len(power) else 0.0
+            photon_relative = photon_values[index] if index < len(photon_values) else 0.0
+            relative_photon_count = photon_power[index] if index < len(photon_power) else 0.0
             row = [
                 str(ticks_ms),
                 kind,
                 "%.1f" % float(grid[index]),
                 "%.8f" % float(values[index]),
                 "%.9g" % float(relative_power),
+                "%.8f" % float(photon_relative),
+                "%.9g" % float(relative_photon_count),
                 lux_est,
                 lux_source,
                 clear_lux_signal,

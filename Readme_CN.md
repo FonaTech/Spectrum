@@ -56,6 +56,7 @@ flowchart LR
 - B20/B19 GPIO 开漏软件 I2C，适配当前接线
 - 暗场归零、增益调节、积分时间调节、暂停/运行、CSV 保存和退出
 - 380-780 nm 可见光相对 SPD 重建，0.1 nm 内部网格，填充面积图显示
+- GUI 和 WebUI 默认显示积分光子数 SPD，并可一键切换为辐射功率 SPD
 - 可见光峰值自动标注，最多显示 5 个峰值波长
 - 760-1000 nm 红外估计小窗，默认隐藏，点击右上角 `IR` 标签显示/隐藏
 - 轻量 WebUI，默认监听 `2932` 端口，可远程查看光谱曲线、操作按钮并下载 CSV
@@ -106,6 +107,7 @@ flowchart LR
    - `Zero`: 采集当前暗场作为基线
    - `Gain -/+`: 调整 AS7341 模拟增益
    - `Int -/+`: 调整积分时间
+   - `Photon` / `Power`: 在积分光子数 SPD 和辐射功率 SPD 之间切换
    - `Save`: 将当前样本追加保存到 `as7341_spectrum_long.csv`
    - `Exit`: 退出应用
 5. 点击右上角 `IR` 标签显示或隐藏红外估计小窗。
@@ -124,7 +126,7 @@ http://<MaixCAM2-IP>:2932/
 
 - 查看实时 380-780 nm 可见光 SPD 填充曲线和峰值标注
 - 查看各 AS7341 通道 raw/corrected 数值
-- 远程执行 `Run/Pause`、`Zero`、`Gain -/+`、`Int -/+`、`Save`、`Exit`
+- 远程执行 `Run/Pause`、`Zero`、`Photon/Power`、`Gain -/+`、`Int -/+`、`Save`、`Exit`
 - 通过 `Download CSV` 直接下载 `as7341_spectrum_long.csv`
 
 如果 Web 服务启动失败，本机触摸屏应用仍可正常运行。
@@ -370,7 +372,7 @@ $$
 
 这样用户可以比较 SPD 明视觉积分和 Clear 通道代理量，也可以在自己的光路条件下建立更适合的照度标定曲线。
 
-## 为什么主 SPD 不再额外做波长能量修正
+## 辐射功率 SPD 与积分光子数 SPD
 
 单个光子的能量为：
 
@@ -378,17 +380,20 @@ $$
 E_{\mathrm{photon}} = \frac{hc}{\lambda}
 $$
 
-这个关系在将辐射功率谱转换为光子通量谱时非常重要，例如植物照明中的 PPFD。但本项目当前的主 SPD 是相对辐射功率谱，AS7341 的响应模型也已经是在光功率响应意义上建立的。如果再对主图额外套用 $1/\lambda$ 或 $\lambda$ 修正，会改变曲线物理含义，并可能再次抬高或压低短波端。
-
-因此：
-
-- GUI 和 WebUI 显示的是相对辐射功率 SPD
-- CSV 的 `relative_power` 保存同一类相对功率谱
-- 如需光子通量，可在导出数据上另行转换：
+这个关系在将辐射功率谱转换为光子通量或光子数谱时非常重要，例如植物照明中的 PPFD。本项目先重建类辐射功率 SPD，因为 AS7341 的通道响应模型是在光功率响应意义上建立的。随后程序再从该结果计算独立的积分光子数视图：
 
 $$
-\Phi_{\mathrm{photon,rel}}(\lambda) \propto p_{\mathrm{rel}}(\lambda)\lambda
+q_{\mathrm{rel}}(\lambda) \propto p_{\mathrm{rel}}(\lambda)\lambda
 $$
+
+程序会明确区分这两种物理含义：
+
+- GUI 和 WebUI 默认显示积分光子数 SPD，也可以切换回辐射功率 SPD。
+- CSV 的 `relative_power` 保存辐射功率重建结果。
+- CSV 的 `relative_photon_count` 保存按波长加权后的相对光子数代理量，`photon_relative_intensity` 保存其归一化绘图值。
+- `lux_est` 仍然是基于 $V(\lambda)$ 的明视觉辐射功率估计，不从光子数 SPD 计算。
+
+这样既不会改变辐射功率图的物理定义，也能直接提供光子数分析所需的数据。
 
 ## 峰值检测
 
@@ -421,8 +426,9 @@ CSV 会导出每一个 0.1 nm 点。GUI 和 WebUI 则绘制降采样后的视觉
 - 采样时间戳、增益、积分时间、饱和状态
 - 10 个通道的 raw、dark、corrected、normalized 数据
 - 可见光 SPD 摘要：主峰、质心、估算 CCT、拟合置信度、峰值列表
-- `kind,wavelength_nm,relative_intensity,relative_power`
+- `kind,wavelength_nm,relative_intensity,relative_power,photon_relative_intensity,relative_photon_count`
 - `lux_est,lux_source,clear_lux_signal`
+- 光子数摘要字段：`photon_integral,photon_dominant_nm,photon_centroid_nm,photon_peaks_nm`
 - 380-780 nm 可见光 SPD 完整 0.1 nm 连续数据
 - 760-1000 nm 红外估计完整 0.1 nm 连续数据
 
