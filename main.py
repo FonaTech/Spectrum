@@ -302,7 +302,9 @@ class AS7341:
     SUPPORT_PRIOR_STRENGTH = 0.18
     SUPPORT_PRIOR_FLOOR = 0.06
     PEAK_SUPPORT_MIN = 0.12
+    OVERLAP_BRIDGE_STRENGTH = 0.0
     UW_CM2_TO_W_M2 = 0.01
+    LUX_OUTPUT_CALIBRATION = 0.5
     CLEAR_LUX_CALIBRATION = 6.83
     REF_VISIBLE_EE_UW_CM2 = 107.67
     REF_VISIBLE_INTEGRATION_MS = 27.8
@@ -311,7 +313,7 @@ class AS7341:
     REF_NIR_GAIN_RATIO_64X = 2.0
     NIR_940_RESPONSIVITY_COUNTS = 5135.0
     OPTICAL_GAIN_RATIOS_64X = [0.008, 0.016, 0.032, 0.065, 0.125, 0.25, 0.5, 1.0, 2.0, 3.95, 7.75]
-    CHANNEL_IRRADIANCE_CALIBRATION = (0.077272, 0.168174, 0.225688, 0.370326, 0.515721, 0.684158, 1.0, 0.83031, 1.0, 1.0)
+    CHANNEL_IRRADIANCE_CALIBRATION = (0.077272, 0.336348, 0.225688, 0.370326, 0.515721, 0.684158, 1.0, 0.83031, 1.0, 1.0)
     SPECTRUM_GRID = _make_nm_grid(380.0, 780.0, GRID_STEP_NM)
     IR_GRID = _make_nm_grid(760.0, 1000.0, GRID_STEP_NM)
     _VISIBLE_MODEL_CACHE = None
@@ -646,6 +648,7 @@ class AS7341:
             x = self._multiplicative_update(x, rows, ycorr, inv_denominator, support_prior)
             x = self._smooth_spectrum(x)
 
+        x = self._apply_overlap_bridge_prior(x, grid, bands)
         x = self._apply_clear_constraint(x, irradiance[8] if len(irradiance) > 8 else 0.0, grid)
         prediction = self._predict_channels(x, rows)
         fit_error = self._fit_error(prediction, ycorr)
@@ -706,7 +709,8 @@ class AS7341:
         size = len(grid)
         rows = []
         denominator = [0.0] * size
-        for center, fwhm, _ in self.SPECTRAL_BANDS:
+        for channel_index, band in enumerate(self.SPECTRAL_BANDS):
+            center, fwhm, _ = band
             start, weights = self._sparse_response_row(center, fwhm, grid)
             rows.append((start, weights))
             for offset, weight in enumerate(weights):
@@ -732,7 +736,7 @@ class AS7341:
         floor = self.SUPPORT_PRIOR_FLOOR
         return [floor + (1.0 - floor) * (value ** 0.65) for value in support]
 
-    def _sparse_response_row(self, center, fwhm, grid):
+    def _sparse_response_row(self, center, fwhm, grid, channel_index=None):
         sigma = max(1.0, float(fwhm) / 2.355)
         raw = []
         total = 0.0
@@ -740,6 +744,10 @@ class AS7341:
             value = math.exp(-0.5 * ((float(wavelength) - center) / sigma) ** 2)
             raw.append(value)
             total += value
+        return self._sparsify_response_row(raw)
+
+    def _sparsify_response_row(self, raw):
+        total = sum(raw)
         if total <= 0:
             return 0, []
         threshold = total * self.RESPONSE_EPS
@@ -794,6 +802,35 @@ class AS7341:
             return spectrum
         keep = 1.0 - strength
         return [value * (keep + strength * support_prior[index]) for index, value in enumerate(spectrum)]
+
+    def _apply_overlap_bridge_prior(self, spectrum, grid, bands):
+        strength = self.OVERLAP_BRIDGE_STRENGTH
+        if strength <= 0 or len(spectrum) != len(grid) or len(grid) < 2:
+            return spectrum
+        out = list(spectrum)
+        step = max(0.001, float(grid[1]) - float(grid[0]))
+        for index in range(len(bands) - 1):
+            left_nm = float(bands[index][0])
+            right_nm = float(bands[index + 1][0])
+            if right_nm <= left_nm:
+                continue
+            left_idx = int(round((left_nm - grid[0]) / step))
+            right_idx = int(round((right_nm - grid[0]) / step))
+            left_idx = max(0, min(len(out) - 1, left_idx))
+            right_idx = max(0, min(len(out) - 1, right_idx))
+            if right_idx <= left_idx + 1:
+                continue
+            left_value = max(0.0, float(out[left_idx]))
+            right_value = max(0.0, float(out[right_idx]))
+            if left_value <= 0 or right_value <= 0:
+                continue
+            for pos in range(left_idx + 1, right_idx):
+                mix = float(pos - left_idx) / float(right_idx - left_idx)
+                bridge = left_value * (1.0 - mix) + right_value * mix
+                floor = bridge * strength
+                if out[pos] < floor:
+                    out[pos] = floor
+        return out
 
     def _predict_channels(self, spectrum, rows):
         prediction = []
@@ -945,7 +982,7 @@ class AS7341:
 
     def _estimate_lux_from_clear(self, corrected, irradiance=None):
         clear_signal = self._clear_lux_signal(corrected, irradiance)
-        lux_est = clear_signal * self.CLEAR_LUX_CALIBRATION
+        lux_est = clear_signal * self.CLEAR_LUX_CALIBRATION * self.LUX_OUTPUT_CALIBRATION
         return max(0.0, lux_est), clear_signal
 
     def _clear_lux_signal(self, corrected, irradiance=None):
@@ -966,7 +1003,7 @@ class AS7341:
             total += max(0.0, float(value)) * weight
             weight_total += weight
         photopic_equiv_irradiance = total / max(weight_total, 1e-12)
-        lux_est = 683.0 * photopic_equiv_irradiance * self.UW_CM2_TO_W_M2
+        lux_est = 683.0 * photopic_equiv_irradiance * self.UW_CM2_TO_W_M2 * self.LUX_OUTPUT_CALIBRATION
         return max(0.0, lux_est), clear_signal
 
     def _photopic_weights(self, grid):
