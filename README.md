@@ -167,7 +167,7 @@ Let $\Phi(\lambda)$ be the spectral radiant power distribution arriving at the s
 For channel $i$, the ideal continuous measurement can be modeled as:
 
 $$
-m_i = g\,t \int R_i(\lambda)\,\Phi(\lambda)\,d\lambda + d_i + n_i
+m_i = gt \int R_i(\lambda)\Phi(\lambda)d\lambda + d_i + n_i
 $$
 
 Where:
@@ -184,8 +184,8 @@ After dark subtraction and exposure normalization:
 
 $$
 \begin{aligned}
-y_i &= \frac{\max(0,\,m_i-d_i)}{g\,t} \\
-&\approx \int R_i(\lambda)\,\Phi(\lambda)\,d\lambda
+y_i &= \frac{\max(0,m_i-d_i)}{gt} \\
+&\approx \int R_i(\lambda)\Phi(\lambda)d\lambda
 \end{aligned}
 $$
 
@@ -202,7 +202,7 @@ Here $s_i$ is a relative sensitivity scale. This is necessary because the same o
 The continuous spectrum is discretized onto a wavelength grid. In this project:
 
 $$
-\lambda_j \in \{380.0,\,380.1,\,...,\,780.0\}\ \mathrm{nm}
+\lambda_j \in \{380.0,380.1,...,780.0\}\ \mathrm{nm}
 $$
 
 Let $x_j$ be the unknown relative radiant power at $\lambda_j$. The channel model becomes:
@@ -259,8 +259,9 @@ The implementation uses a multiplicative update similar in spirit to Richardson-
 $$
 \begin{aligned}
 \hat{y}_i &= \sum_j A_{ij}x_j \\
-r_i &= \frac{y_i}{\max(\hat{y}_i,\,\epsilon)} \\
-x_j &\leftarrow x_j \cdot \operatorname{weighted\_average}_i(r_i)
+r_i &= \frac{y_i}{\max(\hat{y}_i,\epsilon)} \\
+w_j &= \frac{\sum_i A_{ij}r_i}{\sum_i A_{ij}} \\
+x_j &\leftarrow x_j w_j
 \end{aligned}
 $$
 
@@ -268,7 +269,7 @@ In expanded form, the update is:
 
 $$
 x_j \leftarrow x_j \cdot
-\frac{\sum_i A_{ij}\,\frac{y_i}{\hat{y}_i}}
+\frac{\sum_i A_{ij}\frac{y_i}{\hat{y}_i}}
 {\sum_i A_{ij}}
 $$
 
@@ -296,18 +297,22 @@ First, smoothing suppresses narrow numerical spikes that cannot be justified by 
 
 $$
 \mathbf{x} \leftarrow
-\beta\,\operatorname{moving\_average}(\mathbf{x}) + (1-\beta)\mathbf{x}
+\beta M(\mathbf{x}) + (1-\beta)\mathbf{x}
 $$
+
+Here $M(\mathbf{x})$ denotes a moving-average smoothing pass.
 
 Second, a sensor-support prior reduces confidence where the sum of channel responses is weak:
 
 $$
 \begin{aligned}
-\operatorname{support}_j &= \sum_i A_{ij} \\
-\operatorname{prior}_j &= f + (1-f)\,\operatorname{support}_{j,\mathrm{norm}}^{0.65} \\
-x_j &\leftarrow x_j\left[(1-\alpha)+\alpha\,\operatorname{prior}_j\right]
+S_j &= \sum_i A_{ij} \\
+P_j &= f + (1-f)S_{j,\mathrm{norm}}^{0.65} \\
+x_j &\leftarrow x_j\left[(1-\alpha)+\alpha P_j\right]
 \end{aligned}
 $$
+
+Here $S_j$ is the sensor support at wavelength sample $j$, and $P_j$ is the support prior applied to that sample.
 
 This is especially important at the low-wavelength boundary. F1 is centered near 415 nm, so the 380-405 nm region has weak independent support. Without a support prior, the inverse update can push energy toward the boundary and create false 380 nm peaks.
 
@@ -320,7 +325,7 @@ The AS7341 Clear channel has a broad response. It is not a spectral channel, but
 $$
 \begin{aligned}
 C_{\mathrm{measured}} &\approx
-\frac{\mathrm{corrected\_Clear}}{g\,t} \\
+\frac{C_{\mathrm{corr}}}{gt} \\
 C_{\mathrm{predicted}} &= \sum_j C_j x_j \\
 \mathrm{scale} &= \frac{C_{\mathrm{measured}}}{C_{\mathrm{predicted}}}
 \end{aligned}
@@ -339,7 +344,7 @@ Instead, the application reconstructs a separate NIR estimate over 760-1000 nm u
 Illuminance is a photometric quantity. It weights optical power by the human photopic luminous efficiency curve $V(\lambda)$. In physical radiometry and photometry:
 
 $$
-E_v = 683 \int \Phi(\lambda)V(\lambda)\,d\lambda
+E_v = 683 \int \Phi(\lambda)V(\lambda)d\lambda
 $$
 
 The code applies the same idea to the reconstructed relative SPD:
@@ -353,14 +358,14 @@ The default `SPD_LUX_CALIBRATION` is `0.02`, which scales the raw photopic integ
 
 $$
 K_{\mathrm{SPD,new}} =
-\frac{\mathrm{reference\_lux}}{\mathrm{displayed\_lux}_{\mathrm{est}}}
+\frac{L_{\mathrm{ref}}}{L_{\mathrm{displayed}}}
 $$
 
 The CSV also records:
 
 $$
-\mathrm{clear\_lux\_signal} =
-\frac{\mathrm{corrected\_Clear}}{g\,t_{\mathrm{ms}}}
+L_{\mathrm{clear}} =
+\frac{C_{\mathrm{corr}}}{gt_{\mathrm{ms}}}
 $$
 
 This allows users to compare SPD-derived Lux with a Clear-channel proxy and build their own calibration curve if their optical setup makes Clear more reliable.
@@ -442,8 +447,8 @@ A proper calibration matrix can be written conceptually as:
 
 $$
 \begin{aligned}
-\mathbf{y}_{\mathrm{calibrated}} &= C_{\mathrm{channel}}\mathbf{y}_{\mathrm{measured}} \\
-\mathbf{x}_{\mathrm{reconstructed}} &= \operatorname{inverse\_model}(\mathbf{y}_{\mathrm{calibrated}})
+\mathbf{y}_{\mathrm{cal}} &= C_{\mathrm{channel}}\mathbf{y}_{\mathrm{meas}} \\
+\mathbf{x}_{\mathrm{rec}} &= F_{\mathrm{model}}^{-1}(\mathbf{y}_{\mathrm{cal}})
 \end{aligned}
 $$
 
