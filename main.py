@@ -302,12 +302,14 @@ class AS7341:
     SUPPORT_PRIOR_STRENGTH = 0.18
     SUPPORT_PRIOR_FLOOR = 0.06
     PEAK_SUPPORT_MIN = 0.12
+    SPD_LUX_CALIBRATION = 1.0
     CLEAR_LUX_CALIBRATION = 100.0
     SPECTRUM_GRID = _make_nm_grid(380.0, 780.0, GRID_STEP_NM)
     IR_GRID = _make_nm_grid(760.0, 1000.0, GRID_STEP_NM)
     _VISIBLE_MODEL_CACHE = None
     _CLEAR_ROW_CACHE = None
     _IR_SHAPE_CACHE = None
+    _PHOTOPIC_WEIGHT_CACHE = None
 
     LOW_SMUX = [
         (0x00, 0x30),
@@ -564,7 +566,7 @@ class AS7341:
             lux_est, clear_lux_signal = self._estimate_lux_from_clear(corrected, exposure)
             empty["lux_est"] = lux_est
             empty["clear_lux_signal"] = clear_lux_signal
-            empty["lux_source"] = "clear"
+            empty["lux_source"] = "clear_fallback"
             empty["ir"] = self._reconstruct_ir(corrected, exposure)
             return empty
 
@@ -602,7 +604,7 @@ class AS7341:
             "centroid_nm": 0,
             "lux_est": 0.0,
             "clear_lux_signal": 0.0,
-            "lux_source": "clear",
+            "lux_source": "spd_photopic",
             "cct_est": 0,
             "nir_ratio": 0.0,
             "clear_ratio": 0.0,
@@ -828,7 +830,7 @@ class AS7341:
         nir_ratio = float(corrected[9]) / max(1.0, visible_avg)
         clear_ratio = float(corrected[8]) / max(1.0, visible_avg)
         confidence = max(0.0, min(1.0, 1.0 - fit_error))
-        lux_est, clear_lux_signal = self._estimate_lux_from_clear(corrected, exposure)
+        lux_est, clear_lux_signal = self._estimate_lux_from_spd(grid, power, corrected, exposure)
         return {
             "grid": list(grid),
             "values": values,
@@ -837,7 +839,7 @@ class AS7341:
             "centroid_nm": round(float(centroid), 1),
             "lux_est": lux_est,
             "clear_lux_signal": clear_lux_signal,
-            "lux_source": "clear",
+            "lux_source": "spd_photopic",
             "cct_est": int(cct),
             "nir_ratio": nir_ratio,
             "clear_ratio": clear_ratio,
@@ -845,10 +847,43 @@ class AS7341:
         }
 
     def _estimate_lux_from_clear(self, corrected, exposure):
-        clear_value = float(corrected[8]) if len(corrected) > 8 else 0.0
-        clear_signal = max(0.0, clear_value) / max(0.001, float(exposure))
+        clear_signal = self._clear_lux_signal(corrected, exposure)
         lux_est = clear_signal * self.CLEAR_LUX_CALIBRATION
         return max(0.0, lux_est), clear_signal
+
+    def _clear_lux_signal(self, corrected, exposure):
+        clear_value = float(corrected[8]) if len(corrected) > 8 else 0.0
+        return max(0.0, clear_value) / max(0.001, float(exposure))
+
+    def _estimate_lux_from_spd(self, grid, power, corrected, exposure):
+        clear_signal = self._clear_lux_signal(corrected, exposure)
+        weights = self._photopic_weights(grid)
+        total = 0.0
+        for index, value in enumerate(power):
+            if index >= len(weights):
+                break
+            total += max(0.0, float(value)) * weights[index]
+        lux_est = 683.0 * total * self.SPD_LUX_CALIBRATION
+        return max(0.0, lux_est), clear_signal
+
+    def _photopic_weights(self, grid):
+        cached = AS7341._PHOTOPIC_WEIGHT_CACHE
+        if cached and len(cached) == len(grid):
+            return cached
+        if len(grid) < 2:
+            return [0.0 for _ in grid]
+        delta_nm = abs(float(grid[1]) - float(grid[0]))
+        weights = []
+        for wavelength in grid:
+            wavelength = float(wavelength)
+            if wavelength < 380.0 or wavelength > 780.0:
+                weights.append(0.0)
+                continue
+            sigma = 46.0 if wavelength < 555.0 else 70.0
+            v_lambda = math.exp(-0.5 * ((wavelength - 555.0) / sigma) ** 2)
+            weights.append(v_lambda * delta_nm)
+        AS7341._PHOTOPIC_WEIGHT_CACHE = weights
+        return weights
 
     def _find_spectrum_peaks(self, grid, values, peak_support=None, limit=5):
         candidates = []
@@ -1780,7 +1815,7 @@ class SpectrometerApp:
                 "centroid_nm": 0,
                 "lux_est": 0,
                 "clear_lux_signal": 0,
-                "lux_source": "clear",
+                "lux_source": "spd_photopic",
                 "cct_est": 0,
                 "fit_confidence": 0,
                 "ir": {"relative": 0, "peak_nm": 0, "grid": [], "values": []},
@@ -1809,7 +1844,7 @@ class SpectrometerApp:
             "centroid_nm": spectrum.get("centroid_nm", 0),
             "lux_est": spectrum.get("lux_est", 0),
             "clear_lux_signal": spectrum.get("clear_lux_signal", 0),
-            "lux_source": spectrum.get("lux_source", "clear"),
+            "lux_source": spectrum.get("lux_source", "spd_photopic"),
             "cct_est": spectrum.get("cct_est", 0),
             "nir_ratio": spectrum.get("nir_ratio", 0),
             "clear_ratio": spectrum.get("clear_ratio", 0),
@@ -1981,7 +2016,7 @@ class SpectrometerApp:
         base += ["%.5f" % float(v) for v in sample.get("normalized", [])]
 
         lux_est = "%.3f" % float(spectrum.get("lux_est", 0))
-        lux_source = str(spectrum.get("lux_source", "clear"))
+        lux_source = str(spectrum.get("lux_source", "spd_photopic"))
         clear_lux_signal = "%.6f" % float(spectrum.get("clear_lux_signal", 0))
         for row in self._iter_spectrum_csv_rows(
             ticks_ms,

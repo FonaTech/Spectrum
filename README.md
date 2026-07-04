@@ -104,7 +104,7 @@ Current algorithm:
 - Normalizes by gain and integration time.
 - Builds a channel response model from the AS7341 datasheet center wavelengths, FWHM values, and typical responses.
 - Reconstructs a non-negative smoothed visible SPD from F1-F8 over 380-780 nm on a 0.1 nm grid.
-- Uses Clear as a global constraint and as the default basis for estimated Lux.
+- Uses Clear as a global SPD constraint and records the Clear-normalized signal for calibration.
 - Keeps NIR separate from the main SPD and reconstructs a 760-1000 nm IR estimate.
 - Detects local visible SPD peaks and labels up to 5 peak wavelengths.
 - Caches response matrices, Clear response, and NIR curve shape for speed.
@@ -113,16 +113,18 @@ Current algorithm:
 
 The main SPD is treated as a relative radiant-power spectrum. The AS7341 response data already reflects wavelength-dependent optical/electrical response, so the main plot does not apply an additional `E = hc/lambda` correction. Applying that correction again would risk over-boosting short wavelengths. If photon-flux spectrum or PPFD is needed, convert from the exported relative power spectrum separately.
 
-Lux is an estimate:
+Lux is an estimate derived from the reconstructed visible SPD:
 
 ```text
-lux_est = corrected_Clear / (gain * integration_ms) * CLEAR_LUX_CALIBRATION
+lux_est ~= 683 * integral(relative_power(lambda) * V(lambda) d_lambda) * SPD_LUX_CALIBRATION
 ```
 
-The default `CLEAR_LUX_CALIBRATION` is an observation-friendly estimate, not a factory calibration. For trustworthy absolute illuminance, measure the same light source with a calibrated lux meter and set:
+`V(lambda)` is an approximate photopic response curve. This was the earlier Lux method and generally gives larger, more visually plausible readings than a direct Clear-channel linear mapping. The CSV still records `clear_lux_signal = corrected_Clear / (gain * integration_ms)` for calibration and comparison.
+
+The default `SPD_LUX_CALIBRATION` is an observation-friendly estimate, not a factory calibration. For trustworthy absolute illuminance, measure the same light source with a calibrated lux meter and set:
 
 ```text
-CLEAR_LUX_CALIBRATION = reference_lux / clear_lux_signal
+SPD_LUX_CALIBRATION = reference_lux / displayed_lux_est
 ```
 
 For more accurate spectral data, build a device-specific calibration matrix with a standard light source or monochromator and recalibrate for the sensor module, diffuser, optical path, and temperature.

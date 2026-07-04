@@ -104,7 +104,7 @@ AS7341 是 11 通道多光谱传感器，不是高分辨率光谱仪。项目中
 - 按增益和积分时间做曝光归一化。
 - 使用 AS7341 数据手册中的中心波长、FWHM 和典型响应构建通道响应模型。
 - 对 F1-F8 可见光通道进行非负平滑反演，生成 380-780 nm、0.1 nm 网格的相对 SPD。
-- Clear 通道用于整体约束，并作为估算 Lux 的默认基准。
+- Clear 通道用于整体 SPD 约束，并记录 Clear 归一化信号用于后续标定。
 - NIR 通道不与主 SPD 合并，单独生成 760-1000 nm 红外估计小谱。
 - 对可见光 SPD 执行局部峰检测，最多标注 5 个峰值波长。
 - 响应矩阵、Clear 响应和 NIR 曲线会缓存；WebUI 绘图数据会降采样，但 CSV 保留完整 0.1 nm 连续数据。
@@ -112,16 +112,18 @@ AS7341 是 11 通道多光谱传感器，不是高分辨率光谱仪。项目中
 
 主 SPD 按相对辐射功率谱处理。AS7341 数据手册给出的通道响应已经体现了器件对不同波长光功率的响应差异，因此主图不再额外套用 `E = hc/lambda` 做波长能量修正，避免重复抬高短波端。如果需要光子数谱或 PPFD，应在导出的相对功率谱基础上单独按波长转换。
 
-Lux 读数为估算值：
+Lux 读数来自重建可见光 SPD 的明视觉积分估算：
 
 ```text
-lux_est = corrected_Clear / (gain * integration_ms) * CLEAR_LUX_CALIBRATION
+lux_est ~= 683 * integral(relative_power(lambda) * V(lambda) d_lambda) * SPD_LUX_CALIBRATION
 ```
 
-默认 `CLEAR_LUX_CALIBRATION` 是便于观察的估算系数，不是出厂标定值。若要得到可信绝对照度，请使用标准照度计测量同一光源，按以下方式重新标定：
+`V(lambda)` 是近似明视觉响应曲线。这是较早版本使用的 Lux 方法，通常会比直接 Clear 通道线性映射给出更大的、观感上更接近的读数。CSV 仍会记录 `clear_lux_signal = corrected_Clear / (gain * integration_ms)`，用于后续标定和对比。
+
+默认 `SPD_LUX_CALIBRATION` 是便于观察的估算系数，不是出厂标定值。若要得到可信绝对照度，请使用标准照度计测量同一光源，按以下方式重新标定：
 
 ```text
-CLEAR_LUX_CALIBRATION = reference_lux / clear_lux_signal
+SPD_LUX_CALIBRATION = reference_lux / displayed_lux_est
 ```
 
 若需要更接近真实光谱，需要使用标准光源或单色仪建立设备级校准矩阵，并根据传感器模块、扩散片、光路和温度重新标定。
