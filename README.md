@@ -164,7 +164,7 @@ flowchart TD
 
 Let $\Phi(\lambda)$ be the spectral radiant power distribution arriving at the sensor plane. It is the quantity the application tries to reconstruct up to a relative scale. Each AS7341 visible channel has a spectral response function $R_i(\lambda)$, determined by its optical filter, photodiode behavior, and analog/electrical gain path.
 
-For channel `i`, the ideal continuous measurement can be modeled as:
+For channel $i$, the ideal continuous measurement can be modeled as:
 
 $$
 m_i = g\,t \int R_i(\lambda)\,\Phi(\lambda)\,d\lambda + d_i + n_i
@@ -373,7 +373,7 @@ $$
 E_{\mathrm{photon}} = \frac{hc}{\lambda}
 $$
 
-This relation is required when converting radiant power spectra into photon flux spectra, such as PPFD for plant lighting. However, the AS7341 response model used here is already based on channel response to optical power. Applying an additional `1/lambda` or `lambda` correction to the main radiant-power SPD would change the physical meaning of the plot and can overcorrect short wavelengths.
+This relation is required when converting radiant power spectra into photon flux spectra, such as PPFD for plant lighting. However, the AS7341 response model used here is already based on channel response to optical power. Applying an additional $1/\lambda$ or $\lambda$ correction to the main radiant-power SPD would change the physical meaning of the plot and can overcorrect short wavelengths.
 
 Therefore:
 
@@ -403,7 +403,7 @@ The 0.1 nm grid contains 4001 visible points. Direct dense inversion would be un
 - Caching the visible response matrix
 - Truncating negligible Gaussian tails into sparse rows
 - Caching Clear and NIR response curves
-- Caching photopic `V(lambda)` weights
+- Caching photopic $V(\lambda)$ weights
 - Using multiplicative updates instead of matrix decompositions
 - Downsampling WebUI plot data while preserving full-resolution CSV export
 
